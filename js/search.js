@@ -146,7 +146,8 @@ class Search {
     // SLICE 是从递归深处直接抛出来的,中间的 make() 一个都没 unmake,
     // 所以每片结束都要把局面退回根,否则下一片是在一盘被走烂的棋上搜。
     this.baseHistory = board.history.length;
-    this.nullDepth = 0;
+    // 每个空着记下做它时的 history 长度,退回根时才知道它夹在哪两手真着法之间。
+    this.nulls = [];
     this.iterDepth = 0; // 正在搜的那一层;0 = 还没开始
     this.rootI = 0;
     ttGen = (ttGen % 255) + 1; // 世代号必须非 0,0 是"空槽"
@@ -197,9 +198,16 @@ class Search {
       this.finished = true;
     } catch (e) {
       if (e !== SLICE) throw e;
-      // 局面退回根:先撤空着(history 里没有它们的痕迹),再撤真着法。
-      while (this.nullDepth > 0) this.nullUnmake();
-      while (this.b.history.length > this.baseHistory) this.b.unmake();
+      // 局面退回根。空着和真着法在同一条路径上交错,只能严格后进先出地撤:
+      // 先把空着全撤完再撤真着法,unmake 看到的 current 就是错的另一方,
+      // 于是把将/帅的原位写进对方的槽里。棋盘、哈希、current 都靠异或和奇偶还原,
+      // 看不出异常,只有 kings 会坏 —— 将军提示画到别的格上,走子方几乎每个子都"动不了"。
+      const nulls = this.nulls;
+      while (this.b.history.length > this.baseHistory) {
+        if (nulls.length && nulls[nulls.length - 1] === this.b.history.length) this.nullUnmake();
+        else this.b.unmake();
+      }
+      while (nulls.length) this.nullUnmake();
       if (performance.now() > this.deadline) this.finished = true;
     }
   }
@@ -220,15 +228,15 @@ class Search {
 
   /**
    * 空着让一手:只翻走子方和 Zobrist 的 TURN 键,不进 history(搜索里不查重复)。
-   * 计数是必须的 —— SLICE 可能正抛在空着的子树里,退回根时得把这些也一并撤销,
-   * 而 history 里根本没有它们的痕迹。
+   * 记位置是必须的 —— SLICE 可能正抛在空着的子树里,退回根时要把空着和真着法
+   * 按后进先出一起撤掉,而 history 里根本没有空着的痕迹。
    */
   nullMake() {
     const b = this.b;
     b.zobLo ^= TURN_LO;
     b.zobHi ^= TURN_HI;
     b.current = other(b.current);
-    this.nullDepth++;
+    this.nulls.push(b.history.length);
   }
 
   nullUnmake() {
@@ -236,7 +244,7 @@ class Search {
     b.current = other(b.current);
     b.zobLo ^= TURN_LO;
     b.zobHi ^= TURN_HI;
-    this.nullDepth--;
+    this.nulls.pop();
   }
 
   evaluate(side) {

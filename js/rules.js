@@ -142,7 +142,7 @@ class Board {
     const to = sq(m.tf, m.tr);
     const v = this.grid[from];
     const cap = this.grid[to];
-    this.history.push({ m, v, cap, king: this.kings[this.current], text: m.text || null });
+    this.history.push({ m, v, cap, side: this.current, king: this.kings[this.current], text: m.text || null });
 
     this.zobLo ^= ZOB_LO[from * 24 + v] ^ ZOB_LO[to * 24 + v];
     this.zobHi ^= ZOB_HI[from * 24 + v] ^ ZOB_HI[to * 24 + v];
@@ -170,7 +170,9 @@ class Board {
     const to = sq(h.m.tf, h.m.tr);
     this.grid[from] = h.v;
     this.grid[to] = h.cap;
-    if (typeOf(h.v) === T_KING) this.kings[this.current] = h.king;
+    // 用走子方自己(存进 history 的那份)而不是翻回来之后的 current:
+    // 撤销顺序一旦错开,current 就是另一方的,写进去会把将/帅原位串到对方的槽里。
+    if (typeOf(h.v) === T_KING) this.kings[h.side] = h.king;
     this.zobLo ^= ZOB_LO[from * 24 + h.v] ^ ZOB_LO[to * 24 + h.v];
     this.zobHi ^= ZOB_HI[from * 24 + h.v] ^ ZOB_HI[to * 24 + h.v];
     if (h.cap !== EMPTY) {
