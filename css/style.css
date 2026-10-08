@@ -1,0 +1,503 @@
+:root {
+  --ink: #16130f;
+  --ink-2: #1c1814;
+  --slate: #221d17;
+  --line: #332c23;
+  --line-2: #443a2d;
+  --paper: #ece3d4;
+  --muted: #9a8e7e;
+  --cinnabar: #c8402a;
+  --cinnabar-dim: #8e2f1f;
+  --cinnabar-rgb: 200, 64, 42;
+  --brass: #d8a44a;
+  --hover: #2c251d;
+  --track: #241f19;
+  --seal-ink: #fff5ea;
+  --seal-ring: rgba(255, 245, 234, 0.3);
+  --stamp-ink: #fff5ea;
+  --stamp-ring: rgba(255, 245, 234, 0.28);
+  --stamp-drop: rgba(0, 0, 0, 0.5);
+  --stamp-lose: #3d4550;
+  --stamp-lose-ring: rgba(230, 240, 255, 0.22);
+  --stamp-draw: #6a6152;
+  --canvas-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  --canvas-ring: rgba(255, 226, 180, 0.09);
+  --veil-a: rgba(20, 15, 10, 0.5);
+  --veil-b: rgba(12, 9, 6, 0.86);
+  /* 棋片:同一块象牙白面,红方描朱砂圈、黑方描墨圈 —— 和 canvas 上的棋子同一套语言。 */
+  --chip-face: radial-gradient(circle at 32% 28%, #fffaf0, #cfc2ab 82%);
+  --chip-ink-black: #2b2119;
+  --chip-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  --focus: var(--brass);
+  --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  --sans: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  --rail: 288px;
+}
+
+/* 亮色主题:只翻 token,不另写一套选择器。棋盘本身也换成浅枫木(见 render.js
+   的 PALETTES.light),黑子描边加深,否则在浅底上糊掉。 */
+html[data-theme="light"] {
+  --ink: #f4eee3;
+  --ink-2: #efe7d9;
+  --slate: #fbf7ef;
+  --line: #ddd2bf;
+  --line-2: #c8bba4;
+  --paper: #2a231a;
+  --muted: #7a6f5f;
+  --cinnabar: #b8371f;
+  --cinnabar-rgb: 184, 55, 31;
+  --brass: #8a6420;
+  --hover: #e7ddcb;
+  --track: #d8ccb8;
+  --stamp-drop: rgba(60, 40, 20, 0.28);
+  --canvas-shadow: 0 14px 32px rgba(90, 60, 30, 0.28);
+  --canvas-ring: rgba(90, 60, 30, 0.18);
+  --veil-a: rgba(244, 238, 227, 0.5);
+  --veil-b: rgba(236, 228, 212, 0.88);
+  --chip-face: radial-gradient(circle at 32% 28%, #fffdf7, #e2d7c2 82%);
+  --chip-shadow: 0 1px 2px rgba(90, 60, 30, 0.35), 0 0 0 1px rgba(120, 92, 58, 0.4);
+  --focus: #8a6420;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--sans);
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.app {
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* --------------------------------- masthead -------------------------------- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 14px clamp(14px, 3vw, 30px) 12px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--ink-2), var(--ink));
+}
+
+.masthead h1 {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: clamp(20px, 2.6vw, 27px);
+  letter-spacing: 0.22em;
+}
+
+.seal {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 4px;
+  background: var(--cinnabar);
+  color: var(--seal-ink);
+  font-family: var(--serif);
+  font-size: 19px;
+  box-shadow: inset 0 0 0 2px var(--seal-ring);
+}
+
+.mode {
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  margin-left: 4px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+  border-left: 1px solid var(--line-2);
+}
+
+.turn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  color: var(--paper);
+}
+
+/* 标题栏和"执子"里的迷你棋子:和棋盘上的棋子同形,只是缩到 19px。 */
+.chip {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--chip-face);
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: var(--chip-shadow);
+}
+
+.chip.red { color: var(--cinnabar); box-shadow: var(--chip-shadow), inset 0 0 0 1.5px var(--cinnabar); }
+.chip.black { color: var(--chip-ink-black); box-shadow: var(--chip-shadow), inset 0 0 0 1.5px var(--chip-ink-black); }
+.chip.sm { width: 16px; height: 16px; font-size: 10px; margin-right: 7px; }
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: 4px;
+}
+
+.icon-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.icon-btn:hover { color: var(--paper); border-color: var(--line-2); background: var(--hover); }
+
+/* 图标表示"点下去会变成什么":暗色下给太阳,亮色下给月亮。 */
+.icon-btn svg { display: block; }
+.icon-btn .i-moon { display: none; }
+html[data-theme="light"] .icon-btn .i-sun { display: none; }
+html[data-theme="light"] .icon-btn .i-moon { display: block; }
+
+/* ----------------------------------- stage --------------------------------- */
+
+.stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--rail);
+  gap: clamp(14px, 2vw, 26px);
+  padding: clamp(12px, 2vw, 24px) clamp(14px, 3vw, 30px);
+  min-height: 0;
+}
+
+/* 棋盘最小尺寸由 render.js 的 MIN_CELL 兜底:触底之后这里出滚动条,
+   而不是把棋盘压扁 —— 棋子上的汉字小到一定程度就糊了。 */
+.board-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+canvas {
+  display: block;
+  border-radius: 3px;
+  box-shadow: var(--canvas-shadow), 0 0 0 1px var(--canvas-ring);
+  touch-action: manipulation;
+  cursor: pointer;
+}
+
+/* 电脑想棋时棋盘不接受点选,光标也要说明这一点。 */
+canvas.thinking { cursor: progress; }
+
+/* ------------------------------------ rail --------------------------------- */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  background: var(--slate);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.status { display: flex; flex-direction: column; gap: 5px; }
+
+.status-msg {
+  margin: 0;
+  font-size: 15px;
+  min-height: 1.5em;
+  color: var(--paper);
+}
+
+.status-msg.thinking { color: var(--brass); }
+.status-msg.bad { color: var(--cinnabar); }
+.status-msg.check { color: var(--cinnabar); font-weight: 600; }
+
+/* Tabular figures keep the live search counter from jittering as it ticks. */
+.status-stat {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-stat:empty { display: none; }
+
+.group { display: flex; flex-direction: column; gap: 8px; }
+.group.grow { flex: 1 1 auto; min-height: 0; }
+
+.label {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.seg {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.seg.side { grid-template-columns: 1fr 1fr; }
+
+.seg button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 4px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.seg button:hover { color: var(--paper); border-color: var(--line-2); }
+
+.seg button[aria-checked="true"] {
+  color: var(--paper);
+  background: var(--hover);
+  border-color: var(--line-2);
+  box-shadow: inset 0 -2px 0 var(--cinnabar);
+}
+
+/* ----------------------------------- moves --------------------------------- */
+
+.moves {
+  display: grid;
+  grid-template-columns: 2.4em 1fr 1fr;
+  gap: 1px 8px;
+  align-content: start;
+  min-height: 72px;
+  max-height: 30vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.moves:empty::after {
+  content: "尚无走子";
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.moves .no {
+  color: var(--muted);
+  text-align: right;
+}
+
+.moves .mv {
+  padding: 3px 5px;
+  border-radius: 3px;
+  color: var(--paper);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.moves .mv.red { color: var(--cinnabar); }
+.moves .mv.now { background: var(--hover); box-shadow: inset 2px 0 0 var(--cinnabar); }
+
+.moves .mv.flash { animation: mvIn 0.3s ease-out both; }
+
+@keyframes mvIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------------------------------- actions -------------------------------- */
+
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+.btn {
+  appearance: none;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+.btn:hover { background: var(--hover); }
+
+.btn.primary { border-color: var(--cinnabar-dim); background: rgba(var(--cinnabar-rgb), 0.14); }
+.btn.primary:hover { background: rgba(var(--cinnabar-rgb), 0.24); }
+.btn:disabled { opacity: 0.38; cursor: default; }
+.btn:disabled:hover { background: transparent; }
+
+.switch {
+  position: relative;
+  width: 42px;
+  height: 22px;
+  flex: none;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--track);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.18s, background 0.18s;
+}
+
+.switch[aria-checked="true"] { background: rgba(var(--cinnabar-rgb), 0.3); border-color: var(--cinnabar-dim); }
+.switch[aria-checked="true"]::after { transform: translateX(20px); background: var(--cinnabar); }
+
+.sound { display: flex; align-items: center; gap: 12px; }
+
+input[type="range"] {
+  flex: 1;
+  appearance: none;
+  height: 3px;
+  background: var(--line-2);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--paper);
+}
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ----------------------------------- banner -------------------------------- */
+
+.banner {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 16px;
+  background: radial-gradient(circle at 50% 45%, var(--veil-a), var(--veil-b));
+  animation: veil 0.4s ease-out both;
+}
+
+/* `display: grid` above beats the UA rule for [hidden], so say it explicitly. */
+.banner[hidden] { display: none; }
+
+.stamp {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: clamp(64px, 13vmin, 132px);
+  line-height: 1;
+  padding: 0.16em 0.2em;
+  color: var(--stamp-ink);
+  background: var(--cinnabar);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 4px var(--stamp-ring), 0 14px 30px var(--stamp-drop);
+  transform: rotate(-6deg);
+  animation: stamp 0.42s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+.stamp.lose { background: var(--stamp-lose); box-shadow: inset 0 0 0 4px var(--stamp-lose-ring), 0 14px 30px var(--stamp-drop); }
+.stamp.draw { background: var(--stamp-draw); }
+
+.banner-text { margin: 0; font-size: 15px; color: var(--paper); letter-spacing: 0.04em; }
+
+@keyframes veil { from { opacity: 0 } to { opacity: 1 } }
+
+@keyframes stamp {
+  from { opacity: 0; transform: rotate(-14deg) scale(1.75); }
+  to { opacity: 1; transform: rotate(-6deg) scale(1); }
+}
+
+/* --------------------------------- responsive ------------------------------ */
+
+/* 940px:象棋棋盘比五子棋窄而高,侧栏要更早挤下去。 */
+@media (max-width: 940px) {
+  body { overflow: auto; }
+  .app { height: auto; min-height: 100dvh; }
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(420px, 1fr) auto;
+  }
+  .rail { max-height: none; }
+  .moves { max-height: none; }
+  .mode { display: none; }
+}
+
+@media (max-width: 520px) {
+  .masthead { gap: 10px; }
+  .turn { font-size: 13px; }
+  .actions { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banner, .stamp, .moves .mv { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}

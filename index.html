@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>中国象棋 · 人机对战</title>
+<script>
+/* 样式表先画的是深色,所以在它之前就把主题定下来,否则会闪一下白。
+   这里内联是因为 main.js 还没加载,只能设属性。 */
+(function () {
+  var theme = 'dark';
+  try {
+    var p = JSON.parse(localStorage.getItem('xiangqi.prefs') || '{}');
+    if (p.theme === 'light' || p.theme === 'dark') theme = p.theme;
+    else if (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
+  } catch (e) { /* file:// 下部分浏览器禁 localStorage:退化成只在本次会话有效 */ }
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+</script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="masthead">
+    <span class="seal" aria-hidden="true">帥</span>
+    <h1>中国象棋</h1>
+    <span class="mode">人机对战</span>
+
+    <span class="turn" id="turn">
+      <i class="chip red" id="turnChip">帥</i>
+      <span id="turnText">轮到你走</span>
+    </span>
+
+    <div class="tools">
+      <button type="button" class="icon-btn" id="themeBtn" aria-label="切换主题">
+        <svg class="i-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6" />
+        </svg>
+        <svg class="i-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="M20 14.4A8.4 8.4 0 1 1 9.6 4a6.6 6.6 0 0 0 10.4 10.4z" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div class="board-wrap" id="boardWrap">
+      <canvas id="board" aria-label="中国象棋棋盘"></canvas>
+      <div class="banner" id="banner" hidden>
+        <span class="stamp" id="stamp" aria-hidden="true">胜</span>
+        <p class="banner-text" id="bannerText"></p>
+        <button type="button" class="btn primary" id="bannerAgain">再来一局</button>
+      </div>
+    </div>
+
+    <aside class="rail">
+      <div class="status">
+        <p class="status-msg" id="statusMsg" role="status" aria-live="polite">轮到你走</p>
+        <p class="status-stat" id="statusStat"></p>
+      </div>
+
+      <div class="group">
+        <span class="label" id="difficultyLabel">难度</span>
+        <div class="seg" id="difficulty" role="radiogroup" aria-labelledby="difficultyLabel">
+          <button type="button" data-v="low" role="radio" aria-checked="false">低</button>
+          <button type="button" data-v="mid" role="radio" aria-checked="true">中</button>
+          <button type="button" data-v="high" role="radio" aria-checked="false">高</button>
+        </div>
+        <p class="hint" id="difficultyHint"></p>
+      </div>
+
+      <div class="group">
+        <span class="label" id="sideLabel">你执</span>
+        <div class="seg side" id="side" role="radiogroup" aria-labelledby="sideLabel">
+          <button type="button" data-v="1" role="radio" aria-checked="true">
+            <i class="chip sm red" aria-hidden="true">帥</i><span>红 · 先手</span>
+          </button>
+          <button type="button" data-v="2" role="radio" aria-checked="false">
+            <i class="chip sm black" aria-hidden="true">將</i><span>黑 · 后手</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="group grow">
+        <span class="label">走棋记录</span>
+        <!-- 棋谱不进 live region:每手都播报一遍会盖掉状态栏那条真正要读的消息。 -->
+        <div class="moves" id="moves" aria-live="off"></div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" id="undo" disabled>悔棋</button>
+        <button type="button" class="btn primary" id="restart">重新开始</button>
+      </div>
+
+      <div class="group">
+        <span class="label">音效</span>
+        <div class="sound">
+          <button type="button" class="switch" id="mute" role="switch" aria-checked="true" aria-label="音效开关"></button>
+          <input type="range" id="volume" min="0" max="100" value="70" aria-label="音量">
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<!-- 普通脚本(不是 module),所以双击 index.html 就能玩。共享全局作用域,
+     必须按依赖顺序加载:rules → notation → render → sound → search → ai → main。
+     顶层标识符也不能跨文件重名,否则整页 SyntaxError。 -->
+<script src="js/rules.js"></script>
+<script src="js/notation.js"></script>
+<script src="js/render.js"></script>
+<script src="js/sound.js"></script>
+<script src="js/search.js"></script>
+<script src="js/ai.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
