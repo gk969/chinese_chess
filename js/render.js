@@ -5,7 +5,7 @@
 
 const MIN_CELL = 34;      // 再小棋子上的汉字就糊了:触底后由 .board-wrap 出滚动条
 const BOARD_FILL = 0.94;  // 棋盘占可用区域的比例
-const MARGIN = 0.62;      // 坐标标签留白,单位 = cell
+const MARGIN = 0.62;      // 棋盘外框到 canvas 边缘的留白,单位 = cell
 
 const GW = COLS - 1;
 const GH = ROWS - 1;
@@ -23,7 +23,6 @@ const PALETTES = {
     vignette: 'rgba(18,10,4,0.42)',
     grid: 'rgba(38,24,12,0.78)',
     border: 'rgba(28,16,6,0.92)',
-    coord: 'rgba(242,228,204,0.52)',
     riverText: 'rgba(242,228,204,0.15)',
     shadow: 'rgba(0,0,0,0.42)',
     face: { hi: '#fffaef', mid: '#f2e6cf', lo: '#d5c4a6', rim: '#8a7150' },
@@ -44,7 +43,6 @@ const PALETTES = {
     vignette: 'rgba(120,86,44,0.16)',
     grid: 'rgba(74,50,26,0.72)',
     border: 'rgba(58,38,18,0.86)',
-    coord: 'rgba(58,38,18,0.6)',
     riverText: 'rgba(58,38,18,0.18)',
     shadow: 'rgba(90,60,30,0.3)',
     face: { hi: '#fffdf7', mid: '#f7efdf', lo: '#e0d2b8', rim: '#9c8461' },
@@ -60,8 +58,6 @@ const PALETTES = {
     composite: 'source-over',
   },
 };
-
-const CN_RANKS = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
 
 function easeOutBack(t) {
   const c = 1.6;
@@ -103,7 +99,6 @@ class Renderer {
     this.targets = [];
     this.hover = null;
     this.last = null;
-    this.thinking = false;
     this.checkCell = -1;
 
     this.anims = [];
@@ -183,12 +178,6 @@ class Renderer {
 
   setLastMove(from, to) {
     this.last = from && to ? { from, to } : null;
-    this.mark();
-  }
-
-  setThinking(on) {
-    if (this.thinking === on) return;
-    this.thinking = on;
     this.mark();
   }
 
@@ -303,18 +292,6 @@ class Renderer {
       g.rotate(Math.PI);
       g.fillText('漢 界', 0, 0);
       g.restore();
-    }
-
-    // 坐标:红方用汉字(一路在最右),黑方用阿拉伯数字(1 路在最左)
-    if (cell >= 22) {
-      g.fillStyle = pal.coord;
-      g.font = `600 ${Math.round(cell * 0.36)}px ${CANVAS_SERIF}`;
-      g.textAlign = 'center';
-      g.textBaseline = 'middle';
-      for (let f = 0; f < COLS; f++) {
-        g.fillText(CN_RANKS[GW - f], this.px(f), this.py(GH) + cell * 0.42);
-        g.fillText(String(f + 1), this.px(f), this.py(0) - cell * 0.42);
-      }
     }
 
     this.base = c;
@@ -473,7 +450,7 @@ class Renderer {
     this.anims = live;
     this.paint(now);
     this.dirty = false;
-    if (this.anims.length || this.winFx || this.checkCell >= 0 || this.thinking) this.requestDraw();
+    if (this.anims.length || this.winFx || this.checkCell >= 0) this.requestDraw();
   }
 
   animOf(kind) {
@@ -501,7 +478,6 @@ class Renderer {
     this.paintGhost(ctx);
     this.paintCaptured(ctx, now, captured);
     this.paintCheck(ctx, now);
-    if (this.thinking) this.paintThinking(ctx, now);
     if (this.winFx) this.paintWin(ctx, now);
   }
 
@@ -667,24 +643,6 @@ class Renderer {
     ctx.beginPath();
     ctx.arc(this.px(f), this.py(r), cell * (0.52 + 0.06 * pulse), 0, TAU);
     ctx.stroke();
-    ctx.restore();
-  }
-
-  paintThinking(ctx, now) {
-    const cell = this.cell;
-    const o = cell * 0.2;
-    const x0 = this.px(0) - o;
-    const y0 = this.py(0) - o;
-    const w = GW * cell + o * 2;
-    const h = GH * cell + o * 2;
-    const span = w + h;
-    const pos = ((now / 1600) % 1) * span;
-    ctx.save();
-    ctx.strokeStyle = `rgba(${this.pal.sel},0.5)`;
-    ctx.lineWidth = Math.max(1.4, cell * 0.05);
-    ctx.setLineDash([cell * 0.5, cell * 0.9]);
-    ctx.lineDashOffset = -pos;
-    ctx.strokeRect(x0, y0, w, h);
     ctx.restore();
   }
 

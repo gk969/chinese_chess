@@ -442,7 +442,6 @@ class Game {
 
   /** 思考状态还要落到 canvas 的类上,光标才会变成 progress。 */
   thinking(on) {
-    this.renderer.setThinking(on);
     this.renderer.canvas.classList.toggle('thinking', on);
   }
 
@@ -471,16 +470,21 @@ class Game {
     this.el.statusStat.textContent = text;
   }
 
-  /** 思考时实时报数。用 setTimeout 链而不是 rAF —— 后台标签页里 rAF 会被冻住。 */
+  /** 思考时实时报数。用 setTimeout 链而不是 rAF —— 后台标签页里 rAF 会被冻住,
+      而且搜索本身就在占着主线程,rAF 排不上。 */
   startStatTimer() {
     this.stopStatTimer();
     const tick = () => {
       const s = AI.current;
       if (!s) return;
-      this.statLine(`电脑 · ${s.completeDepth} 层 · ${fmtNum(s.nodes)} 个局面`);
-      this.statTimer = setTimeout(tick, 120);
+      // iterDepth 是正在搜的那一层,0 表示还没进第一层;它不会超过已跑完的层数 + 1。
+      this.statLine(
+        `电脑 · 已搜完 ${s.completeDepth} 层 · 正在搜第 ${Math.max(s.iterDepth, s.completeDepth + 1)} 层` +
+        ` · ${fmtNum(s.nodes)} 个局面 · ${((performance.now() - s.started) / 1000).toFixed(1)} 秒`
+      );
+      this.statTimer = setTimeout(tick, 200);
     };
-    this.statTimer = setTimeout(tick, 120);
+    this.statTimer = setTimeout(tick, 200);
   }
 
   stopStatTimer() {

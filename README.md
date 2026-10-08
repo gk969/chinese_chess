@@ -168,11 +168,13 @@ Undo, restart and a difficulty change increment a token and set a cancel flag: a
 exits at its next yield point, and the callback is only accepted if the token is unchanged — so
 starting a new game while the computer is thinking does not drop a ghost piece.
 
-While the computer thinks, the second line of the status area shows live progress (completed
-depth, positions searched); after the move it becomes the verdict for that move, e.g.
-`电脑 · 7 层 · 2,809,856 个局面 · 2.50 秒`. The depth is the last one that **completed**, so
-seeing 8 ply while thinking and 7 ply in the result is normal. That counter runs on a
-`setTimeout` chain rather than `requestAnimationFrame` — rAF is frozen in background tabs.
+While the computer thinks, the second line of the status area refreshes every 200 ms with the
+completed depth, the depth currently being searched, the positions searched and the elapsed time,
+e.g. `电脑 · 已搜完 6 层 · 正在搜第 7 层 · 1,234,567 个局面 · 1.4 秒`. Once the move lands the
+same line becomes the verdict for it, e.g. `电脑 · 7 层 · 2,809,856 个局面 · 2.50 秒`. Both report
+the last depth that **completed**, so a readout stuck at 6 ply next to a result of 7 ply is normal.
+The refresh runs on a `setTimeout` chain rather than `requestAnimationFrame` — rAF is frozen in
+background tabs, and the search is holding the main thread anyway, so rAF would not get scheduled.
 
 ## Rules
 
@@ -191,10 +193,9 @@ seeing 8 ply while thinking and 7 ply in the result is normal. That counter runs
 
 ## Notation
 
-The move list uses Chinese notation, on the same numbering printed along the top and bottom of
-the board: files are counted from **each player's own** right-hand side, so Red's file 1 is at
-the far right of the screen and Black's file 1 at the far left. Red writes files as
-`一二三四五六七八九`, Black as `1…9`.
+The move list uses Chinese notation. Files are counted from **each player's own** right-hand side,
+so Red's file 1 is at the far right of the screen and Black's file 1 at the far left. Red writes
+files as `一二三四五六七八九`, Black as `1…9`.
 
 The shape is `piece + origin file + action + destination`:
 
@@ -220,13 +221,13 @@ The board has a minimum size of 314 × 348 pixels — the cell pitch bottoms out
 which the characters on the pieces go blurry. In narrower windows the board area gets scrollbars
 rather than the board getting squashed.
 
-The board is **not square**: 9 files × 10 ranks, plus the coordinate margins, comes to 9.24 ×
+The board is **not square**: 9 files × 10 ranks, plus the frame margins, comes to 9.24 ×
 10.24 cell pitches, so `layout()` has to solve for cell pitch in each direction and take the
 smaller. Treating it as square makes the board overflow sideways in a narrow window and leaves a
 band of empty space above and below in a wide one. As the available space grows, the board takes
 94% of the smaller side of the board area and scales up proportionally; piece radius, font size,
-line width, selection ring, target dots, glows and coordinates are all derived from that one cell
-pitch, so board and pieces always scale together.
+line width, selection ring, target dots and glows are all derived from that one cell pitch, so
+board and pieces always scale together.
 
 The `ResizeObserver` callback is debounced through one `requestAnimationFrame`, so dragging the
 window relayouts once per frame. The canvas backing resolution follows `devicePixelRatio` (capped
@@ -246,7 +247,7 @@ animation formula.
 
 In light mode the board itself becomes pale maple, and three things follow: the dark rim on the
 piece edges gets stronger (a drop shadow alone does not read as depth on a pale ground), the
-coordinates and river text flip to dark, and the win/lose light band's composite mode changes
+river text flips to dark, and the win/lose light band's composite mode changes
 from `lighter` to `source-over` — `lighter` blows out to pure white on a pale ground and the band
 and particles become invisible. So the composite mode is itself a token.
 
