@@ -450,7 +450,10 @@ class Renderer {
     this.anims = live;
     this.paint(now);
     this.dirty = false;
-    if (this.anims.length || this.winFx || this.checkCell >= 0) this.requestDraw();
+    // 选中提示是 140/160ms 的淡入,不在 anims 里。不为此续帧的话,唯一那一帧
+    // 正好停在淡入起点(落点还是透明的),要等鼠标一动才画得出来。
+    const selFading = this.sel && now - this.selT0 < 170;
+    if (this.anims.length || this.winFx || this.checkCell >= 0 || selFading) this.requestDraw();
   }
 
   animOf(kind) {
