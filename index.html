@@ -84,12 +84,6 @@
         </div>
       </div>
 
-      <div class="group grow">
-        <span class="label">走棋记录</span>
-        <!-- 棋谱不进 live region:每手都播报一遍会盖掉状态栏那条真正要读的消息。 -->
-        <div class="moves" id="moves" aria-live="off"></div>
-      </div>
-
       <div class="actions">
         <button type="button" class="btn" id="undo" disabled>悔棋</button>
         <button type="button" class="btn primary" id="restart">重新开始</button>
@@ -101,6 +95,13 @@
           <button type="button" class="switch" id="mute" role="switch" aria-checked="true" aria-label="音效开关"></button>
           <input type="range" id="volume" min="0" max="100" value="70" aria-label="音量">
         </div>
+      </div>
+
+      <!-- 棋谱放最下面,吃掉栏里剩下的高度:它是唯一长度可变的块。 -->
+      <div class="group grow">
+        <span class="label">走棋记录</span>
+        <!-- 棋谱不进 live region:每手都播报一遍会盖掉状态栏那条真正要读的消息。 -->
+        <div class="moves" id="moves" aria-live="off"></div>
       </div>
     </aside>
   </main>

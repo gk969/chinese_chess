@@ -313,8 +313,8 @@ canvas.thinking { cursor: progress; }
   grid-template-columns: 2.4em 1fr 1fr;
   gap: 1px 8px;
   align-content: start;
+  flex: 1 1 auto;
   min-height: 72px;
-  max-height: 30vh;
   overflow-y: auto;
   scrollbar-width: thin;
   font-variant-numeric: tabular-nums;
@@ -487,7 +487,6 @@ input[type="range"]::-moz-range-thumb {
     grid-template-rows: minmax(420px, 1fr) auto;
   }
   .rail { max-height: none; }
-  .moves { max-height: none; }
   .mode { display: none; }
 }
 
