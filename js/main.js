@@ -27,11 +27,18 @@ class Game {
       turnChip: $('turnChip'),
       turnText: $('turnText'),
       statusMsg: $('statusMsg'),
-      statusStat: $('statusStat'),
+      statA: $('statA'),
+      statB: $('statB'),
       difficulty: $('difficulty'),
       difficultyHint: $('difficultyHint'),
       side: $('side'),
       moves: $('moves'),
+      importBtn: $('importBtn'),
+      exportBtn: $('exportBtn'),
+      copyBtn: $('copyBtn'),
+      pasteBtn: $('pasteBtn'),
+      fileInput: $('fileInput'),
+      pasteBox: $('pasteBox'),
       undo: $('undo'),
       restart: $('restart'),
       mute: $('mute'),
@@ -142,6 +149,16 @@ class Game {
     this.el.restart.addEventListener('click', () => this.newGame());
     this.el.bannerAgain.addEventListener('click', () => this.newGame());
 
+    this.el.exportBtn.addEventListener('click', () => this.exportMoves());
+    this.el.copyBtn.addEventListener('click', () => this.copyMoves());
+    this.el.pasteBtn.addEventListener('click', () => this.pasteMoves());
+    this.el.importBtn.addEventListener('click', () => this.el.fileInput.click());
+    this.el.fileInput.addEventListener('change', () => {
+      const f = this.el.fileInput.files[0];
+      this.el.fileInput.value = ''; // 同一个文件选两次也要能再导入
+      if (f) this.readFile(f);
+    });
+
     this.el.mute.addEventListener('click', () => {
       this.prefs.muted = !this.prefs.muted;
       this.savePrefs();
@@ -243,7 +260,7 @@ class Game {
 
     this.el.banner.hidden = true;
     this.el.moves.textContent = '';
-    this.el.statusStat.textContent = '';
+    this.statLines('', '');
     this.updateUndo();
     this.syncTurn();
     this.say(this.human === RED ? '轮到你走' : '电脑先走', '');
@@ -391,7 +408,10 @@ class Game {
         this.afterMove();
         return;
       }
-      this.statLine(`电脑 · ${res.depth} 层 · ${fmtNum(res.nodes)} 个局面 · ${(res.elapsed / 1000).toFixed(2)} 秒`);
+      this.statLines(
+        `电脑 · ${res.depth} 层 · ${(res.elapsed / 1000).toFixed(2)} 秒`,
+        `${fmtNum(res.nodes)} 个局面`,
+      );
       this.play(res.move);
     });
   }
@@ -434,7 +454,7 @@ class Game {
     if (st.lostKing >= 0 && !this.reduceMotion) {
       this.renderer.startWin({ f: fileOf(st.lostKing), r: rankOf(st.lostKing) }, iWon);
     }
-    this.statLine(st.reason === 'repetition' ? '重复局面三次' : st.reason === 'mate' ? '将死' : '困毙');
+    this.statLines(st.reason === 'repetition' ? '重复局面三次' : st.reason === 'mate' ? '将死' : '困毙', '');
     this.say(st.winner === null ? '和棋' : iWon ? '你赢了' : '你输了', iWon ? '' : 'bad');
   }
 
@@ -466,8 +486,11 @@ class Game {
     this.el.statusMsg.className = 'status-msg' + (cls ? ' ' + cls : '');
   }
 
-  statLine(text) {
-    this.el.statusStat.textContent = text;
+  /** 状态栏那两行读数。空串也要写:两行的 min-height 是固定的,
+      思考中和思考结束占的高度一样,栏里下面的块才不会上下跳。 */
+  statLines(a, b) {
+    this.el.statA.textContent = a;
+    this.el.statB.textContent = b;
   }
 
   /** 思考时实时报数。用 setTimeout 链而不是 rAF —— 后台标签页里 rAF 会被冻住,
@@ -477,10 +500,9 @@ class Game {
     const tick = () => {
       const s = AI.current;
       if (!s) return;
-      // iterDepth 是正在搜的那一层,0 表示还没进第一层;它不会超过已跑完的层数 + 1。
-      this.statLine(
-        `电脑 · 已搜完 ${s.completeDepth} 层 · 正在搜第 ${Math.max(s.iterDepth, s.completeDepth + 1)} 层` +
-        ` · ${fmtNum(s.nodes)} 个局面 · ${((performance.now() - s.started) / 1000).toFixed(1)} 秒`
+      this.statLines(
+        `电脑 · ${s.completeDepth} 层 · ${((performance.now() - s.started) / 1000).toFixed(1)} 秒`,
+        `${fmtNum(s.nodes)} 个局面`,
       );
       this.statTimer = setTimeout(tick, 200);
     };
@@ -494,7 +516,176 @@ class Game {
   }
 
   updateUndo() {
-    this.el.undo.disabled = !this.board.history.length || AI.busy;
+    const has = !!this.board.history.length;
+    this.el.undo.disabled = !has || AI.busy;
+    this.el.exportBtn.disabled = !has;
+    this.el.copyBtn.disabled = !has;
+  }
+
+  /* -------------------------------- 棋谱进出 -------------------------------- */
+
+  /** 按回合排成 "1. 炮二平五 砲2进7"。导入时序号会被剥掉,所以怎么写都能读回来。 */
+  movesText() {
+    const h = this.board.history;
+    const lines = [];
+    for (let i = 0; i < h.length; i += 2) {
+      const red = h[i] ? h[i].text || '·' : '';
+      const black = h[i + 1] ? h[i + 1].text || '·' : '';
+      lines.push(`${(i >> 1) + 1}. ${red}${black ? ' ' + black : ''}`);
+    }
+    return lines.join('\n');
+  }
+
+  stamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+      `_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+  }
+
+  exportMoves() {
+    const text = this.movesText();
+    if (!text) return;
+    // BOM不能省:Windows 记事本没有它就按本地编码猜,中文棋谱直接成乱码。
+    // 写成转义而不是字面字符,因为它在源码里看不见。
+    const blob = new Blob(['\uFEFF' + text + '\n'], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `xq_${this.stamp()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    this.say('棋谱已导出', '');
+  }
+
+  readFile(file) {
+    const reader = new FileReader();
+    reader.onload = () => this.loadMoves(String(reader.result));
+    reader.onerror = () => this.say('这个文件读不出来', 'bad');
+    reader.readAsText(file, 'utf-8');
+  }
+
+  /** 换行、空格、中英文逗号都算分隔;行首的 "1." 这类序号剥掉。 */
+  parseMoves(text) {
+    const out = [];
+    for (let t of text.replace(/^\uFEFF/, '').split(/[\s,，。;；]+/)) {
+      t = t.replace(/^\d+\s*[.、)]\s*/, '');
+      if (t) out.push(t);
+    }
+    return out;
+  }
+
+  /**
+   * 导入不写记谱解析器:拿每一手去比对当前局面每个合法着法生成的记谱,相等就是它。
+   * 记谱在给定局面下本来就是唯一的(同线的歧义已经由前/中/后消掉了),所以匹配得上
+   * 那一手必然是那一手,匹配不上就是这局走到这儿不通。
+   *
+   * 先在临时局面里走完,走通了才换掉当前对局 —— 半途报错不能把棋盘留在中间状态。
+   */
+  loadMoves(text) {
+    const tokens = this.parseMoves(text);
+    if (!tokens.length) {
+      this.say('没读到棋谱', 'bad');
+      this.sound.reject();
+      return;
+    }
+    // 文件和粘贴都汇到这儿,所以确认写在这里才两边都拦得住。
+    if (this.board.history.length && !this.over && !confirm('导入会替换当前对局,继续?')) return;
+
+    const b = new Board();
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      const m = b.legalMoves(b.current).find((x) => notate(b, x) === t);
+      if (!m) {
+        this.say(`第 ${i + 1} 手读不通:${t}`, 'bad');
+        this.sound.reject();
+        return;
+      }
+      m.text = t;
+      b.make(m);
+    }
+
+    this.token++;
+    AI.stop();
+    this.stopStatTimer();
+    this.thinking(false);
+    this.board = b;
+    this.over = false;
+    this.sel = null;
+    this.selMoves = [];
+
+    const last = b.history[b.history.length - 1];
+    this.renderer.setBoard(b);
+    this.renderer.clearWin();
+    this.renderer.setCheck(-1);
+    this.renderer.setSelection(null, []);
+    this.renderer.setLastMove({ f: last.m.f, r: last.m.r }, { f: last.m.tf, r: last.m.tr });
+
+    this.el.banner.hidden = true;
+    this.statLines('', '');
+    this.renderMoves();
+    this.syncCheck();
+    this.updateUndo();
+    this.syncTurn();
+    this.say(`已导入 ${tokens.length} 手`, '');
+
+    const st = b.gameState();
+    if (st.over) this.finish(st);
+    else if (b.current !== this.human) this.scheduleAI();
+  }
+
+  async copyMoves() {
+    const text = this.movesText();
+    if (!text) return;
+    if (await this.writeClip(text)) this.say('棋谱已复制到剪切板', '');
+    else this.say('浏览器不让访问剪切板', 'bad');
+  }
+
+  /** 异步剪切板 API 要安全上下文,file:// 下不一定有,所以留一条 execCommand 退路。 */
+  async writeClip(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) { /* 往下退 */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async pasteMoves() {
+    let text = null;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (e) {
+      text = null; // 权限被拒,或这个浏览器根本不读剪切板
+    }
+    if (text === null) this.askPaste();
+    else this.loadMoves(text);
+  }
+
+  /** 读不到剪切板就改成让用户自己按 Ctrl+V:聚焦一个看不见的输入框接 paste 事件。 */
+  askPaste() {
+    const ta = this.el.pasteBox;
+    ta.value = '';
+    ta.focus();
+    this.say('请按 Ctrl+V 粘贴棋谱', 'thinking');
+    ta.addEventListener('paste', (e) => {
+      const text = e.clipboardData ? e.clipboardData.getData('text') : '';
+      ta.value = '';
+      ta.blur();
+      if (text) this.loadMoves(text);
+      else this.say('剪切板里没有内容', 'bad');
+    }, { once: true });
   }
 
   /** 棋谱每次整体重建:悔棋要缩短它,重建成本来就不长,比做增量对账省事。 */

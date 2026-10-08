@@ -59,7 +59,10 @@
     <aside class="rail">
       <div class="status">
         <p class="status-msg" id="statusMsg" role="status" aria-live="polite">轮到你走</p>
-        <p class="status-stat" id="statusStat"></p>
+        <!-- 两行固定高度,思考中和思考结束填同样两行。空着也占位:
+             否则读数出现/消失会把下面整栏往下顶。 -->
+        <p class="status-stat" id="statA"></p>
+        <p class="status-stat" id="statB"></p>
       </div>
 
       <div class="group">
@@ -100,9 +103,19 @@
       <!-- 棋谱放最下面,吃掉栏里剩下的高度:它是唯一长度可变的块。 -->
       <div class="group grow">
         <span class="label">走棋记录</span>
+        <div class="moves-tools">
+          <button type="button" class="btn sm" id="importBtn">导入</button>
+          <button type="button" class="btn sm" id="exportBtn" disabled>导出</button>
+          <button type="button" class="btn sm" id="copyBtn" disabled>复制</button>
+          <button type="button" class="btn sm" id="pasteBtn">粘贴</button>
+        </div>
         <!-- 棋谱不进 live region:每手都播报一遍会盖掉状态栏那条真正要读的消息。 -->
         <div class="moves" id="moves" aria-live="off"></div>
       </div>
+
+      <!-- 浏览器不给读剪切板时,粘贴改走这里:按钮聚焦它,用户按 Ctrl+V。 -->
+      <textarea id="pasteBox" class="paste-box" tabindex="-1" aria-hidden="true"></textarea>
+      <input type="file" id="fileInput" accept=".txt,text/plain" tabindex="-1" aria-hidden="true">
     </aside>
   </main>
 </div>

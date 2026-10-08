@@ -246,16 +246,19 @@ canvas.thinking { cursor: progress; }
 .status-msg.bad { color: var(--cinnabar); }
 .status-msg.check { color: var(--cinnabar); font-weight: 600; }
 
-/* Tabular figures keep the live search counter from jittering as it ticks. */
+/* Tabular figures keep the live search counter from jittering as it ticks.
+   min-height 让空着的那行照样占位:读数出现/消失时整栏不会上下跳。 */
 .status-stat {
   margin: 0;
+  min-height: 1.55em;
   font-size: 12px;
   line-height: 1.55;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-.status-stat:empty { display: none; }
 
 .group { display: flex; flex-direction: column; gap: 8px; }
 .group.grow { flex: 1 1 auto; min-height: 0; }
@@ -307,6 +310,8 @@ canvas.thinking { cursor: progress; }
 }
 
 /* ----------------------------------- moves --------------------------------- */
+
+.moves-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 
 .moves {
   display: grid;
@@ -377,6 +382,21 @@ canvas.thinking { cursor: progress; }
 .btn.primary:hover { background: rgba(var(--cinnabar-rgb), 0.24); }
 .btn:disabled { opacity: 0.38; cursor: default; }
 .btn:disabled:hover { background: transparent; }
+
+/* 棋谱那四个按钮挤在 268px 的侧栏里,得比 .actions 那对矮一截。 */
+.btn.sm { padding: 6px 2px; font-size: 12px; }
+
+/* 剪切板读不到时用来接 Ctrl+V;file 输入框只是导出/导入的触发器。
+   不能用 display:none —— 那样就没法 focus。 */
+.paste-box,
+#fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
 
 .switch {
   position: relative;

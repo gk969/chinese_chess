@@ -27,7 +27,9 @@ Serving it works exactly the same.
   and you can undo after a win or a loss to carry on playing.
 - Changing sides starts a new game. Difficulty can be changed mid-game; if the computer is
   thinking, it immediately restarts its search at the new level.
-- The move list uses Chinese notation (炮二平五 / 砲2进7) and highlights the latest move.
+- The move list uses Chinese notation (炮二平五 / 砲2进7) and highlights the latest move. Below it,
+  four buttons export the game to a txt file, import one back, or copy the record to the system
+  clipboard and restore it from there.
 
 ## The three difficulty levels
 
@@ -168,13 +170,17 @@ Undo, restart and a difficulty change increment a token and set a cancel flag: a
 exits at its next yield point, and the callback is only accepted if the token is unchanged — so
 starting a new game while the computer is thinking does not drop a ghost piece.
 
-While the computer thinks, the second line of the status area refreshes every 200 ms with the
-completed depth, the depth currently being searched, the positions searched and the elapsed time,
-e.g. `电脑 · 已搜完 6 层 · 正在搜第 7 层 · 1,234,567 个局面 · 1.4 秒`. Once the move lands the
-same line becomes the verdict for it, e.g. `电脑 · 7 层 · 2,809,856 个局面 · 2.50 秒`. Both report
-the last depth that **completed**, so a readout stuck at 6 ply next to a result of 7 ply is normal.
-The refresh runs on a `setTimeout` chain rather than `requestAnimationFrame` — rAF is frozen in
-background tabs, and the search is holding the main thread anyway, so rAF would not get scheduled.
+While the computer thinks, the two lines under the status message refresh every 200 ms: the upper
+one carries the completed depth and the elapsed time, the lower one the positions searched, e.g.
+`电脑 · 6 层 · 1.4 秒` / `1,234,567 个局面`. Once the move lands the same two lines become the
+verdict for it, e.g. `电脑 · 7 层 · 2.50 秒` / `2,809,856 个局面`. Both report the last depth that
+**completed**, so a readout stuck at 6 ply next to a result of 7 ply is normal.
+
+Both lines have a fixed height and hold their space even when empty, and neither wraps (an
+overflowing line is truncated). Thinking and finished therefore occupy exactly the same height, so
+the readout appearing or vanishing never shoves the rest of the rail up and down. The refresh runs
+on a `setTimeout` chain rather than `requestAnimationFrame` — rAF is frozen in background tabs, and
+the search is holding the main thread anyway, so rAF would not get scheduled.
 
 ## Rules
 
@@ -214,6 +220,33 @@ the file number is part of the notation.
 Notation has to be computed **before** the move is made: it reads the board as it was beforehand,
 and once the move is made the other piece on that file may be counted wrong. So it is computed
 once and stored in the history, which undo shortens and restart clears.
+
+## Importing and exporting the record
+
+Four buttons under the move list: import, export, copy, paste.
+
+Export writes one line per move, `1. 炮二平五 馬2进3`, into a file named
+`xq_YYYY-MM-DD_HH-MM-SS.txt`. The file starts with a UTF-8 BOM — without it Windows Notepad guesses
+a local encoding and the Chinese notation turns into mojibake.
+
+Import **does not parse the notation**. Each token is matched against the notation generated for
+every legal move in the position reached so far, and an equal one is that move. Notation is already
+unique for a given position (same-file ambiguity is resolved by 前/中/后), so a match has to be that
+move and a mismatch means the game does not reach this far. That also means the separator never had
+to be pinned down: newlines, spaces, Chinese or Latin commas and semicolons all split tokens, and a
+leading `1.`-style number is stripped, so a hand-typed line or something pasted from elsewhere reads
+back fine.
+
+The whole record is replayed into a temporary board first, and the current game is only swapped out
+once every move replayed — an error halfway through never leaves the board in a half-replayed state.
+After a successful import, if it is the computer's turn it starts thinking immediately, and if the
+imported position is already finished it is scored immediately. Importing over a game in progress
+asks for confirmation first (both the file and the paste path are gated).
+
+Copy and paste use `navigator.clipboard`. The async clipboard API needs a secure context, which
+`file://` does not always count as, and browsers often refuse reads, so each direction has a
+fallback: writing falls back to `execCommand('copy')`, and when reading is refused the game focuses an
+invisible input box, asks you to press `Ctrl+V`, and takes the text from the `paste` event.
 
 ## Scaling
 
