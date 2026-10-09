@@ -13,17 +13,15 @@
  * spread  = 允许在最好着法多少分以内随机挑,让中低档每局不一样。
  */
 const PROFILES = {
-  low: { depth: 2, rootCap: 10, innerCap: 12, qDepth: 0, budget: 120, tt: false, blunder: 0.35, spread: 80 },
-  mid: { depth: 7, rootCap: 24, innerCap: 24, qDepth: 4, budget: 700, tt: true, blunder: 0, spread: 25 },
-  high: { depth: 12, rootCap: 40, innerCap: 32, qDepth: 6, budget: 2500, tt: true, blunder: 0, spread: 0 },
+  low: { depth: 2, rootCap: 10, qDepth: 0, qsChk: 0, chkExt: 0, budget: 120, tt: false, blunder: 0.35, spread: 80 },
+  mid: { depth: 8, rootCap: 24, qDepth: 4, qsChk: 0, chkExt: 2, budget: 900, tt: true, blunder: 0, spread: 25 },
+  high: { depth: 14, rootCap: 128, qDepth: 5, qsChk: 0, chkExt: 2, budget: 6000, tt: true, blunder: 0, spread: 0 },
 };
 
 const MATE = 30000;
 const MATE_EDGE = MATE - 1000; // 超过这条线就算杀棋分,存盘时要按 ply 平移
 const INF = 1 << 20;
 const SLICE_MS = 40;
-// 静态搜索里允许连续应将的层数。给到 3 层时 d4 一层就 5000 万节点,2 层是拐点。
-const QS_CHK = 2;
 const SLICE = { slice: true };
 
 const FLAG_EXACT = 0;
@@ -32,7 +30,7 @@ const FLAG_UPPER = 2;
 
 /* --------------------------------- 置换表 --------------------------------- */
 
-const TT_BITS = 18;
+const TT_BITS = 20;
 const TT_SIZE = 1 << TT_BITS;
 const TT_MASK = TT_SIZE - 1;
 const TT_LO = new Int32Array(TT_SIZE);
@@ -45,6 +43,24 @@ let ttGen = 0;
 /* ------------------------------ 子力与位置表 ------------------------------ */
 
 const PIECE_VALUE = [0, 0, 200, 220, 420, 900, 470, 100]; // 下标 = 兵种;将/帅不算子力分
+
+/**
+ * 棋型权重(子力分之上的加成,尺度:兵=100 車=900)。
+ * 只写 PST 里没有的东西 —— 沉底炮/卧槽马/沉底车/过河兵 PST 已经计价,再加分就是算两遍。
+ */
+const EVAL_W = {
+  cannonFace: 80, // 空头炮:炮与对方将同列且中间无子
+  palaceHorse: 50, // 窝心马:堵在自己九宫中心
+  openFile: 25, // 車在无阻线(两边都没兵)
+  semiFile: 12, // 車在半开线(没自家兵)
+  fullGuard: 24, // 士象全,中局加分
+  fullGuardEnd: -43, // 残局里士象全反而绊子
+  pawnVsGuard: 12, // 过河兵按对方缺的士象个数加分
+};
+
+const PALACE_CENTER_R = sq(4, 8); // 自家九宫中心 —— 马堵在这儿就是窝心马
+const PALACE_CENTER_B = sq(4, 1);
+const ENDGAME_MAT = 2600; // 双方車馬炮总子力低于这条线就算残局
 
 /**
  * 位置表按红方视角写:r=0 是黑方底线(红方前进的方向),每表 10 行 × 9 列。
@@ -72,7 +88,7 @@ const PST = {
     -10, 25, 50, 55, 50, 55, 50, 25, -10,
     -10, 20, 40, 45, 40, 45, 40, 20, -10,
     -10, 15, 30, 35, 30, 35, 30, 15, -10,
-    -5, 10, 20, 25, 20, 25, 20, 10, -5,
+    -5, 10, 20, 25, 0, 25, 20, 10, -5, // 九宫中心另按窝心马扣分
     -5, -5, 10, 15, 10, 15, 10, -5, -5, // 边线马最差
   ],
   [T_CANNON]: [
@@ -247,19 +263,68 @@ class Search {
     this.nulls.pop();
   }
 
+  /** 炮 c 与将 k 同列、中间一个子都没有 —— 空头炮。 */
+  cannonFace(c, k) {
+    if (c < 0 || k < 0) return false;
+    const g = this.b.grid;
+    const f = fileOf(c);
+    if (f !== fileOf(k)) return false;
+    const a = rankOf(c), z = rankOf(k);
+    const lo = a < z ? a : z, hi = a < z ? z : a;
+    for (let r = lo + 1; r < hi; r++) if (g[sq(f, r)] !== EMPTY) return false;
+    return true;
+  }
+
+  /** 車在开线/半开线的加分(按車所属方,红正黑负)。 */
+  rookFile(r, own, foe) {
+    if (r < 0) return 0;
+    const f = 1 << fileOf(r);
+    if (own & f) return 0;
+    return foe & f ? EVAL_W.semiFile : EVAL_W.openFile;
+  }
+
   evaluate(side) {
     const g = this.b.grid;
-    let s = 0;
+    let s = 0, mat = 0;
+    let kR = -1, kB = -1;
+    let aR = 0, eR = 0, aB = 0, eB = 0;
+    let pfR = 0, pfB = 0, cpR = 0, cpB = 0;
+    // 車炮各最多两个,用标量存 —— evaluate 每个叶子都跑,这里分配数组就是每秒几百万次垃圾。
+    let cR0 = -1, cR1 = -1, cB0 = -1, cB1 = -1, rR0 = -1, rR1 = -1, rB0 = -1, rB1 = -1;
     for (let i = 0; i < CELLS; i++) {
       const v = g[i];
       if (v === EMPTY) continue;
       const t = typeOf(v);
-      if (t === T_KING) continue;
-      const st = sideOf(v);
-      const idx = st === RED ? i : sq(fileOf(i), ROWS - 1 - rankOf(i));
-      const val = PIECE_VALUE[t] + PST[t][idx];
-      s += st === side ? val : -val;
+      if (t === T_KING) { if (sideOf(v) === RED) kR = i; else kB = i; continue; }
+      const red = sideOf(v) === RED;
+      const idx = red ? i : sq(fileOf(i), ROWS - 1 - rankOf(i));
+      let val = PIECE_VALUE[t] + PST[t][idx];
+      if (t === T_PAWN) {
+        if (red) pfR |= 1 << fileOf(i); else pfB |= 1 << fileOf(i);
+        if ((red && rankOf(i) <= 4) || (!red && rankOf(i) >= 5)) { if (red) cpR++; else cpB++; }
+      } else {
+        if (t === T_ROOK || t === T_CANNON || t === T_HORSE) mat += PIECE_VALUE[t];
+        if (t === T_ADVISOR) { if (red) aR++; else aB++; }
+        else if (t === T_ELEPHANT) { if (red) eR++; else eB++; }
+        else if (t === T_HORSE && (i === PALACE_CENTER_R || i === PALACE_CENTER_B)) val -= EVAL_W.palaceHorse;
+        else if (t === T_CANNON) { if (red) { if (cR0 < 0) cR0 = i; else cR1 = i; } else { if (cB0 < 0) cB0 = i; else cB1 = i; } }
+        else if (t === T_ROOK) { if (red) { if (rR0 < 0) rR0 = i; else rR1 = i; } else { if (rB0 < 0) rB0 = i; else rB1 = i; } }
+      }
+      s += red === (side === RED) ? val : -val;
     }
+
+    // 棋型项一律按"红方正"累加,最后统一换成 side 的视角。
+    let pat = 0;
+    // 空头炮:静态分原本完全不看将,所以被炮架住将门这件事在旧评估里是隐形的。
+    let cf = (this.cannonFace(cR0, kB) ? 1 : 0) + (this.cannonFace(cR1, kB) ? 1 : 0) -
+      (this.cannonFace(cB0, kR) ? 1 : 0) - (this.cannonFace(cB1, kR) ? 1 : 0);
+    pat += cf * EVAL_W.cannonFace;
+    pat += (this.rookFile(rR0, pfR, pfB) + this.rookFile(rR1, pfR, pfB) -
+      this.rookFile(rB0, pfB, pfR) - this.rookFile(rB1, pfB, pfR));
+    const full = (aR === 2 && eR === 2 ? 1 : 0) - (aB === 2 && eB === 2 ? 1 : 0);
+    pat += full * (mat < ENDGAME_MAT ? EVAL_W.fullGuardEnd : EVAL_W.fullGuard);
+    pat += (cpR * Math.max(0, 4 - (aB + eB)) - cpB * Math.max(0, 4 - (aR + eR))) * EVAL_W.pawnVsGuard;
+    s += side === RED ? pat : -pat;
     return s;
   }
 
@@ -329,7 +394,7 @@ class Search {
     for (; this.rootI < this.rootLimit; this.rootI++) {
       const m = this.rootMoves[this.rootI];
       const cap = b.make(m);
-      const sc = typeOf(cap) === T_KING ? MATE : -this.negamax(depth - 1, -INF, -this.rootAlpha, 1);
+      const sc = typeOf(cap) === T_KING ? MATE : -this.negamax(depth - 1, -INF, -this.rootAlpha, 1, 0);
       b.unmake();
       // 只有抬高了 α 的着法拿到的是精确分,可以进随机池;失败的只是上界。
       if (sc > this.rootAlpha) {
@@ -365,7 +430,7 @@ class Search {
 
   /* ------------------------------- 内部节点 ------------------------------- */
 
-  negamax(depth, alpha, beta, ply) {
+  negamax(depth, alpha, beta, ply, ext) {
     this.nodes++;
     this.tick();
 
@@ -380,10 +445,12 @@ class Search {
     if (this.p.tt && TT_GEN[idx] === this.ttGen && TT_LO[idx] === keyLo && TT_HI[idx] === keyHi) {
       const info = TT_INFO[idx];
       first = TT_MOVE[idx] - 1;
-      if (((info >>> 16) & 63) >= depth) {
-        let sc = (info & 0xffff) - 32768;
-        if (sc > MATE_EDGE) sc -= ply;
-        else if (sc < -MATE_EDGE) sc += ply;
+      let sc = (info & 0xffff) - 32768;
+      if (sc > MATE_EDGE) sc -= ply;
+      else if (sc < -MATE_EDGE) sc += ply;
+      // 杀棋分不看存储深度:深度 2 证明的杀棋到深度 8 照样成立。
+      // 卡存储深度正是"浅层找到的杀传不上来"的原因。
+      if (((info >>> 16) & 63) >= depth || sc > MATE_EDGE || sc < -MATE_EDGE) {
         const flag = (info >>> 22) & 3;
         if (flag === FLAG_EXACT) return sc;
         if (flag === FLAG_LOWER) {
@@ -395,17 +462,24 @@ class Search {
       }
     }
 
-    // 不做将军延伸:伪合法搜索里"被将"的分支下一手就能吃掉对方的王,本来就停不下来,
-    // 延伸只会让 depth 不单调下降、把置换表记录的深度搞乱。该判的将交给 quiesce 的应将分支。
-    if (depth <= 0) return this.quiesce(alpha, beta, this.p.qDepth, ply, QS_CHK);
+    const inChk = b.inCheck(me);
+    if (depth <= 0) {
+      // 被将的叶子不能只算静态分 —— 那等于"看不见正在被将"。给它一层,解将就在主搜索树里
+      // 做,这才是把应将从 quiesce 挪过来的正解(那边摊开是 45 叉,挤得主搜索只剩一层)。
+      // 只在叶子延伸:内部节点也延伸等于全局加深,实测白掉三层。
+      // 次数必须封顶 —— depth 不下降会一路递归下去;同一局面按已延伸次数深度也不同,
+      // 置换表的深度记账只能偏保守(探测时深度比存的高就不用,不会用错)。
+      if (!inChk || ext >= this.p.chkExt) return this.quiesce(alpha, beta, this.p.qDepth, ply, this.p.qsChk);
+      depth = 1;
+      ext++;
+    }
 
     // 空着让一手:静态分已经 ≥ β 还切不动,那对方也切不动,这个 β 就守住了。
     // 象棋里逼走劣着(zugzwang)很少,深度够时这么剪的误差远小于它省下的时间。
     // 将杀分附近不剪(可能把杀棋剪掉),被将时不剪(让一手等于送吃王)。
-    const inChk = b.inCheck(me);
     if (!inChk && depth >= 3 && beta < MATE_EDGE && this.evaluate(me) >= beta) {
       this.nullMake();
-      const sc = -this.negamax(depth - 1 - (depth >> 1), -beta, -beta + 1, ply + 1);
+      const sc = -this.negamax(depth - 1 - (depth >> 1), -beta, -beta + 1, ply + 1, ext);
       this.nullUnmake();
       if (sc >= beta) return sc;
     }
@@ -416,22 +490,19 @@ class Search {
     let best = -INF;
     let bestCode = -1;
     let searched = 0;
-    const cap = this.p.innerCap;
 
     for (let i = 0; i < moves.length; i++) {
       const m = moves[i];
-      // 吃子排在最前,所以这条只会截断安静着法,不会漏掉任何吃子。
-      if (searched >= cap && b.at(m.tf, m.tr) === EMPTY) break;
-
       const c = this.code(m);
       // 排序靠后的安静着法先少搜两层;真抬高了 α 再补一层重搜。
       // 置换着法不减 —— 它上一轮已经证明过自己。
       const red = !inChk && depth >= 3 && searched >= 4 && c !== first && b.at(m.tf, m.tr) === EMPTY ? (searched >= 12 ? 2 : 1) : 0;
 
       const captured = b.make(m);
-      let sc = typeOf(captured) === T_KING ? MATE - ply : -this.negamax(depth - 1 - red, -beta, -alpha, ply + 1);
-      if (red > 0 && sc > alpha && typeOf(captured) !== T_KING) {
-        sc = -this.negamax(depth - 1, -beta, -alpha, ply + 1);
+      const king = typeOf(captured) === T_KING;
+      let sc = king ? MATE - ply : -this.negamax(depth - 1 - red, -beta, -alpha, ply + 1, ext);
+      if (red > 0 && sc > alpha && !king) {
+        sc = -this.negamax(depth - 1, -beta, -alpha, ply + 1, ext);
       }
       b.unmake();
       searched++;
@@ -467,9 +538,11 @@ class Search {
   /**
    * 静态搜索:象棋里兑子太密集,不搜吃子会一路白送。
    * 平时只搜吃子 + 站住静态分,并用 delta 剪枝跳过明显补不回来的吃子;
-   * 被将时静态分毫无意义,要搜全部应着,否则叶子节点会"看不见"正在被将 ——
-   * 但连将链必须封顶:每层都摊开全部应着就是 45^qd,实测一层 d4 里 5000 万个节点
-   * 有 4100 万是应将,主搜索反而只剩 541 个。所以连续应将只给 QS_CHK 层。
+   * 被将时静态分毫无意义,要搜全部应着,否则叶子节点会"看不见"正在被将。
+   *
+   * 吃子链和应将链的预算必须分开算。两者都卡 `qDepth` 时,战术局面里应将摊开成 45 叉,
+   * 主搜索被挤死,只能把 qDepth 一刀切到 4 —— 那是靠废掉 QS 换深度,回吃链跟着一起瞎。
+   * 现在应将只花 `qsChk`,吃子链照旧走 `qDepth`,两个维度可以分别调。
    */
   quiesce(alpha, beta, qd, ply, chk) {
     this.nodes++;
@@ -483,8 +556,8 @@ class Search {
     let moves;
 
     if (inChk) {
-      // 超出应将预算就退回静态分:主搜索自己有深度,不会真的看不见这步将。
-      if (qd <= 0 || chk <= 0) return this.evaluate(me);
+      // 超出应将预算就退回静态分:主搜索的深度延伸会补上这一眼。
+      if (chk <= 0) return this.evaluate(me);
       const idx = (b.zobLo ^ b.zobHi) & TT_MASK;
       let first = -1;
       if (this.p.tt && TT_GEN[idx] === this.ttGen && TT_LO[idx] === b.zobLo && TT_HI[idx] === b.zobHi) {
@@ -493,7 +566,7 @@ class Search {
       moves = this.order(b.genPseudo(me), ply, first);
       if (!moves.length) return -MATE + ply;
     } else {
-      chk = QS_CHK; // 不在将,重新给满应将预算
+      chk = this.p.qsChk; // 不在将,重新给满应将预算
       stand = this.evaluate(me);
       if (stand >= beta) return stand;
       if (qd <= 0) return stand;
@@ -512,7 +585,15 @@ class Search {
       const cap = b.at(m.tf, m.tr);
       if (!inChk && typeOf(cap) !== T_KING && stand + PIECE_VALUE[typeOf(cap)] + 150 < alpha) continue;
       const captured = b.make(m);
-      const sc = typeOf(captured) === T_KING ? MATE - ply : -this.quiesce(-beta, -alpha, qd - 1, ply + 1, inChk ? chk - 1 : chk);
+      // "走完自己还在将"的吃子是非法着法。搜它不但白花一整棵树,还会让 QS 的应将分支
+      // 在吃子链里层层触发 —— 那才是静态搜索爆炸的主体。直接跳过。
+      if (!inChk && typeOf(captured) !== T_KING && b.inCheck(me)) {
+        b.unmake();
+        continue;
+      }
+      // 应将花的是 chk 的预算,不吃 qd;吃子链才吃 qd。
+      const sc = typeOf(captured) === T_KING ? MATE - ply :
+        -this.quiesce(-beta, -alpha, inChk ? qd : qd - 1, ply + 1, inChk ? chk - 1 : chk);
       b.unmake();
       if (sc > alpha) alpha = sc;
       if (alpha >= beta) break;
