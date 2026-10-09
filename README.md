@@ -33,18 +33,21 @@ Serving it works exactly the same.
 
 ## The three difficulty levels
 
-| Level | Search | Root candidates | Inner candidates | Quiescence | Behaviour |
+| Level | Search | Root candidates | Quiescence | Time budget | Behaviour |
 |---|---|---|---|---|---|
-| Low | 2 ply | 10 | 12 | off | 35% of the time ignores the search entirely and plays a random legal move |
-| Medium | iterative deepening to 7 ply | 24 | 24 | 4 ply | picks at random among moves within 25 points of the best |
-| High | iterative deepening to 12 ply | 40 | 32 | 6 ply | no randomness, at most about 2.5 s per move |
+| Low | 2 ply | 10 | off | 120 ms | 35% of the time ignores the search entirely and plays a random legal move |
+| Medium | iterative deepening to 8 ply | 24 | 4 ply of captures | 900 ms | picks at random among moves within 25 points of the best |
+| High | iterative deepening to 14 ply | 128 | 5 ply of captures | 6 s | no randomness, at most about 6 s per move |
 
 All three levels run the same pipeline; the profile only changes how deep it goes, how much
-of the machinery is switched on, and how much randomness is mixed in at the end.
+of the machinery is switched on, and how much randomness is mixed in at the end. Inner nodes
+are no longer capped in how many moves they search — they used to drop everything past the
+32nd quiet move with no re-search, which was a quiet way to hand over a piece. Late-move
+reduction (shallow first, re-search if it beats alpha) does that job now.
 
 ### Scoring a position
 
-Material plus a piece-square table, and nothing else — no mobility term, no king-safety term:
+Material, plus a piece-square table, plus a small set of pattern bonuses:
 
 | Piece | Value |
 |---|---|
@@ -57,15 +60,34 @@ Material plus a piece-square table, and nothing else — no mobility term, no ki
 | General (將 / 帥) | not scored |
 
 Leaving the generals unscored is deliberate: they are always on the board, so scoring them
-would only add a constant to both sides. King safety is handled by the search instead —
-hanging the general is blocked at the root by the legal-move filter, and deeper in the tree
-by the "capture the general and you win" score.
+would only add a constant to both sides. Hanging the general is handled by the search instead —
+blocked at the root by the legal-move filter, and deeper in the tree by the "capture the general
+and you win" score.
 
 The piece-square tables are written from Red's point of view as 10 rows × 9 columns, and
 flipped vertically when looked up for Black. Bonuses sit on top of the material value, so a
 soldier's worth changes continuously with where it is: barely anything before it crosses the
 river, rising as it pushes toward the centre afterwards, worth over a hundred points more at
 its best square than at its worst. That is what makes the engine willing to advance soldiers.
+
+**Pattern bonuses** (on top of material, on the same scale: soldier = 100, chariot = 900):
+
+| Pattern | Bonus | Notes |
+|---|---|---|
+| Cannon on an open general file | 80 | The cannon shares a file with the enemy general with nothing between them. Material alone never looked at the generals, so having the general pinned like this used to be invisible |
+| Horse in the palace centre | −50 | A horse stuck on its own palace square; that PST cell was flattened to 0 at the same time so the same fact is not charged twice |
+| Chariot on an open / half-open file | 25 / 12 | No friendly soldier on that file; open means neither side has one |
+| Full advisors and elephants | +24 midgame / −43 endgame | Below 2600 combined chariot+horse+cannon material the position counts as an endgame, where full guards get in the way |
+| Soldier past the river | +12 per missing pair of the opponent's guards | Only the increment; soldiers are not repriced |
+
+Sunken cannons, chestnut-corner horses, sunken chariots and crossed soldiers are already priced
+into the piece-square tables, so they get no separate term — counting one fact twice is worse
+than not counting it.
+
+These bonuses are **depth-dependent**. The same weights make the engine weaker at 60k nodes per
+move (39–42% in self-play) and clearly stronger at 400k (about 60%): knowledge only pays back
+once the search is deep enough to use it. At Low's 2 ply they are mostly noise — what makes Low
+*low* is the 35% random roll described below.
 
 ### The search
 
@@ -82,7 +104,7 @@ illegal move.
 
 Four things make the depth affordable:
 
-- **Transposition table** — 262,144 direct-mapped slots keyed by a Zobrist hash split into
+- **Transposition table** — 1,048,576 direct-mapped slots keyed by a Zobrist hash split into
   two 32-bit integers. A slot only counts if both halves match, and a collision just
   overwrites it. Score, depth and "exact or bound" are packed into one `Int32Array`; the best
   move goes in another. The table is not cleared between games — a generation counter is
@@ -104,6 +126,11 @@ shuffle around in a position it has already won. Before a win score is stored in
 is shifted back by the depth, otherwise the same position reached along two paths would carry
 two different scores because the ply differs.
 
+**On lookup, a win score ignores the stored depth**: a mate in three proved at depth 2 is still
+true at depth 8. Win scores used to be gated by "stored depth ≥ current depth" like ordinary
+scores, so a mate found shallow never travelled up the tree — the most direct reason the engine
+missed mates. After the ply shift a win score always exceeds `MATE_EDGE`, so the test is free.
+
 ### Quiescence and being in check
 
 Xiangqi is dense with capture tactics, and scoring at the leaves outright would let the engine
@@ -118,21 +145,39 @@ searched, and there are routinely twenty or thirty of them. Give them the same d
 single ply explodes to fifty million nodes. Measured at depth 4: of 50 million nodes in that
 ply, 41.6 million were inside check evasions, while the main search itself visited 541 nodes.
 
-The fix is a budget of just 2 for *consecutive* check evasions: past that the search falls back
-to the static score and stops counting. Node count for the same ply drops from 50 million to
-56,807. This is safe because the main search has its own depth and will not genuinely miss that
-check; the budget only caps the endless "evade, then trade captures" branch. Evasion moves are
-ordered with the table move first as well.
+The old fix was a budget of just 2 for *consecutive* check evasions. The trouble is that
+`qDepth` gated the capture chain and the evasions with the same knob, so in a tactical position
+the only way to survive was to cut it to 4 — buying depth by switching quiescence off, blindness
+to recaptures included. Worst case measured, under that old profile with the budget raised all
+the way to 6 seconds: a position with 31 legal moves, 29 of which lose to an immediate mate,
+**completed one single ply** and scored the losing position +20.
+
+The fix is to give the two chains separate budgets:
+
+- **The capture chain** keeps `qDepth` (5 ply on High, 4 on Medium) and is no longer dragged
+  down by evasions.
+- **Evasions are not searched in quiescence at all** (that budget is 0); the main search covers
+  them instead. A leaf that is in check gets one extra ply to get out of check, at most twice
+  along one path. The count has to be capped or `depth` stops decreasing and recursion runs away;
+  and it applies **at leaves only** — extending inner nodes as well deepens the whole tree, which
+  measurably cost three plies.
+- **Quiescence skips captures that leave the side to move in check.** Those moves are illegal
+  anyway; searching them wasted a whole subtree *and* re-triggered the evasion branch inside the
+  capture chain, which was the bulk of the explosion.
+
+The same position went from 1 ply to 7; the opening now reaches 13 ply inside the 6 second
+budget. Evasions are still ordered with the table move first.
 
 ### What each level actually runs
 
 | | Low | Medium | High |
 |---|---|---|---|
-| Depth cap (ply) | 2 | 7 | 12 |
-| Root candidates | 10 | 24 | 40 |
-| Candidates per inner node | 12 | 24 | 32 |
-| Quiescence depth | 0 | 4 | 6 |
-| Time budget | 120 ms | 700 ms | 2500 ms |
+| Depth cap (ply) | 2 | 8 | 14 |
+| Root candidates | 10 | 24 | 128 |
+| Quiescence capture chain (ply) | 0 | 4 | 5 |
+| Check evasions inside quiescence | off | off | off |
+| Leaf check extension (times) | 0 | 2 | 2 |
+| Time budget | 120 ms | 900 ms | 6000 ms |
 | Transposition table | off | on | on |
 | Null move / late reductions | unreachable | on | on |
 | Blunder probability | 35% | — | — |
@@ -148,10 +193,12 @@ root move within `random range` points of the best and picks one of those at ran
 range is 0, so the pool holds only the best move and High is deterministic. Medium's 25 points
 means it plays moves that are "just as good" rather than the same move every game.
 
-The depth cap is a cap, not a guarantee. Measured from the opening: Low 2 ply / 72 nodes;
-Medium 7 ply / 150k nodes / 0.14 s; High 7 ply / 2.76M nodes / 2.5 s / roughly 1.1M nodes per
-second. High's 12-ply cap is out of reach in the opening and only gets touched in endgames with
-few pieces — its job is to not put a ceiling on those.
+The depth cap is a cap, not a guarantee. Measured from the opening: Low 2 ply / 81 nodes;
+Medium 8 ply / 71k nodes / 0.15 s; High 13 ply / 5.69M nodes / 6 s / roughly 950k nodes per
+second. In the opening it is the 6 second budget that runs out first, not the 14-ply cap; a
+middlegame usually stops at 10 ply and a sharp tactical position at 7. The cap's job is to not
+ceiling endgames. Nodes spent on a ply that did not finish are thrown away (measured at
+46–76%), which is why the reported depth is always one that completed.
 
 ### Keeping the interface responsive
 
@@ -161,7 +208,7 @@ animations keep running while the computer thinks.
 
 When interrupted, it throws a sentinel out and rewinds the position to the root. **The root's
 move loop has to be resumable**: one ply often spans several slices, and if every slice restarted
-from the root's first move, alpha would never accumulate and the whole 2.5 seconds would go into
+from the root's first move, alpha would never accumulate and the whole 6 seconds would go into
 re-searching the same ply. So the root is split into begin / step / commit, and each slice picks
 up at the move it stopped on. Pending null moves have to be unwound cleanly on the way back too —
 they never enter the history, so a separate counter keeps track of them.
@@ -173,7 +220,7 @@ starting a new game while the computer is thinking does not drop a ghost piece.
 While the computer thinks, the two lines under the status message refresh every 200 ms: the upper
 one carries the completed depth and the elapsed time, the lower one the positions searched, e.g.
 `电脑 · 6 层 · 1.4 秒` / `1,234,567 个局面`. Once the move lands the same two lines become the
-verdict for it, e.g. `电脑 · 7 层 · 2.50 秒` / `2,809,856 个局面`. Both report the last depth that
+verdict for it, e.g. `电脑 · 9 层 · 6.00 秒` / `7,289,856 个局面`. Both report the last depth that
 **completed**, so a readout stuck at 6 ply next to a result of 7 ply is normal.
 
 Both lines have a fixed height and hold their space even when empty, and neither wraps (an
@@ -359,7 +406,7 @@ js/rules.js       the 9×10 position, move generation and legality, check / mate
 js/notation.js    Chinese notation (炮二平五 / 前马进七)
 js/render.js      Canvas drawing and animation, including both PALETTES
 js/sound.js       Web Audio synthesized sound
-js/search.js      search: iterative-deepening alpha-beta + quiescence + transposition table + null move
+js/search.js      search: iterative-deepening alpha-beta + quiescence + transposition table + null move + pattern eval
 js/ai.js          search host: queueing and cancellation
 js/main.js        state machine and UI events
 ```
