@@ -6,7 +6,7 @@
 产物名沿用上游 makefile 的 `stockfish.js` 容易让人误以为是 Stockfish 本体,已改名。
 引擎自己在 `uci` 握手里的 `id name` 是 Pikafish-HCE。
 
-对局已经由它跑:`js/engine.js` 是适配层,`js/ai.js` 是它在游戏里的入口,难度五档的参数在
+对局已经由它跑:`js/engine.js` 是适配层,`js/ai.js` 是它在游戏里的入口,难度七档的参数在
 `js/engine.js` 的 `TIERS` 里。旧的 JS 搜索 `js/search.js` 留在仓库里但不再被 `index.html` 加载。
 
 ## 来源与许可

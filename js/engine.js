@@ -18,11 +18,20 @@ const TIERS = {
   '3': { skill: 20, ms: 200 },
   '4': { skill: 20, ms: 600 },
   '5': { skill: 20, ms: 1000 },
+  // 6、7 档另加 nodes:单层上限不到位的时限根本花不出去(实测 5 秒档跑到 2.9 秒、
+  // 20 层就被掐停了),加深只能靠放宽这一层能搜多少节点。代价见 LAYER_NODES。
+  '6': { skill: 20, ms: 2000, nodes: 1000000 },
+  '7': { skill: 20, ms: 5000, nodes: 2000000 },
 };
 
-/* 单层的节点上限。层与层的时间极不均匀(实测中位 1~3ms、p99 300~420ms、最长 510ms),
-   这个上限是给"主线程一次卡多久"兜底的。它是软的:引擎每隔 min(1024, nodes/1024) 次根着法
-   才查一次节点数,所以会超一点。掐掉了就停止加深。 */
+/* 单层的节点上限。层与层的时间极不均匀(40 万上限下实测单层中位 1~3ms、p99 370~470ms、
+   最长 570~650ms),这个上限是给"主线程一次卡多久"兜底的。它是软的:引擎每隔
+   min(1024, nodes/1024) 次根着法才查一次节点数,所以会超一点。掐掉了就停止加深。
+
+   它同时也是深度的天花板,所以 6、7 档按档位放宽。实测最长的一层跟着上限走:
+   40 万 ≈ 0.6 秒、100 万 ≈ 1.5 秒、200 万 ≈ 2.3 秒 —— 那是这一手里最长的一次卡顿,
+   期间读数不刷、点击排队;而且放宽之后"卡得久"的层从偶发变成常态(200 万档 7.5% 的层
+   超过 0.39 秒)。这个构建只在读命令处让出,想在一次迭代里搜得更深就得卡得更久,没有两全。 */
 const LAYER_NODES = 400000;
 
 const Engine = {
@@ -131,6 +140,7 @@ const Engine = {
     await this.whenReady();
 
     const t0 = performance.now();
+    const cap = t.nodes || LAYER_NODES;
     this.send('setoption name Skill Level value ' + t.skill);
     this.send('position fen ' + board.fen());
 
@@ -147,7 +157,7 @@ const Engine = {
       // 光靠微任务链浏览器是插不进来的(实测一整秒一次都不刷新)。
       if (d > 1) await new Promise((r) => setTimeout(r, 0));
 
-      this.send('go depth ' + d + ' nodes ' + LAYER_NODES);
+      this.send('go depth ' + d + ' nodes ' + cap);
       let layerNodes = 0, depth = 0;
       for (;;) {
         const line = await this.next();

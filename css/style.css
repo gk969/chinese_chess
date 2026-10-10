@@ -284,8 +284,8 @@ canvas.thinking { cursor: progress; }
 
 .seg.side { grid-template-columns: 1fr 1fr; }
 
-/* 难度五档,比 .seg 默认的三列宽。按钮里只有一个数字,五列也不挤。 */
-#difficulty.seg { grid-template-columns: repeat(5, 1fr); }
+/* 难度七档,比 .seg 默认的三列宽。按钮里只有一个数字,七列也不挤。 */
+#difficulty.seg { grid-template-columns: repeat(7, 1fr); }
 
 .seg button {
   appearance: none;

@@ -26,7 +26,7 @@ download.
   move there. Hovering shows a translucent preview.
 - Clicking a different one of your pieces just reselects it, with no error; clicking
   somewhere unreachable clears the selection and says so.
-- The right-hand panel switches difficulty (levels 1-5, 1 being the weakest) and whether you
+- The right-hand panel switches difficulty (levels 1-7, 1 being the weakest) and whether you
   play Red (first move) or Black (second).
 - Undo takes back one of your moves and one of the opponent's. Restart is always available,
   and you can undo after a win or a loss to carry on playing.
@@ -36,23 +36,29 @@ download.
   four buttons export the game to a txt file, import one back, or copy the record to the system
   clipboard and restore it from there.
 
-## The five difficulty levels
+## The seven difficulty levels
 
-The computer is the single-threaded WASM build of Pikafish-HCE in `engine/`. The five levels
-move only two knobs: the engine's own Skill Level (its strength-limiters) and the time budget
-per move.
+The computer is the single-threaded WASM build of Pikafish-HCE in `engine/`. The seven levels
+move three knobs: the engine's own Skill Level (its strength-limiters), the time budget per move,
+and the node cap for a single layer. The first two are the ones that matter; the third is forced
+on us — see item 2 of the next section, where a per-layer node cap is both the bound on "how long
+the main thread blocks at once" and the ceiling on depth, so levels 6 and 7 cannot spend their
+2 and 5 seconds without relaxing it.
 
 The table below is measured with **the scheme the shipped code uses** (layer-by-layer `go depth`,
 see the next section): opponent ElephantEye 3.31 on the same 200 ms limit, 20 games, eight fixed
-openings with colours alternated, zero illegal moves, zero timeouts.
+openings with colours alternated, zero illegal moves, zero timeouts. Scores were measured only
+through level 5; levels 6 and 7 get a separate table below, for the reason given after it.
 
-| Level | Skill Level | Budget | Measured per move | Avg ply | Score |
-|---|---|---|---|---|---|
-| 1 | 5 | 200 ms | 276 ms | 18.0 | 13% (0-5-15) |
-| 2 | 8 | 200 ms | 278 ms | 15.9 | 30% (0-12-8) |
-| 3 | 20 | 200 ms | 316 ms | 24.1 | 73% (9-11-0) |
-| 4 | 20 | 600 ms | 729 ms | 34.4 | 83% (13-7-0) |
-| 5 | 20 | 1000 ms | 1000 ms | 36.3 | 80% (12-8-0) |
+| Level | Skill Level | Budget | Node cap per layer | Measured per move | Avg ply | Score |
+|---|---|---|---|---|---|---|
+| 1 | 5 | 200 ms | 400k | 276 ms | 18.0 | 13% (0-5-15) |
+| 2 | 8 | 200 ms | 400k | 278 ms | 15.9 | 30% (0-12-8) |
+| 3 | 20 | 200 ms | 400k | 316 ms | 24.1 | 73% (9-11-0) |
+| 4 | 20 | 600 ms | 400k | 729 ms | 34.4 | 83% (13-7-0) |
+| 5 | 20 | 1000 ms | 400k | 1000 ms | 36.3 | 80% (12-8-0) |
+| 6 | 20 | 2000 ms | 1M | see below | see below | not measured |
+| 7 | 20 | 5000 ms | 2M | see below | see below | not measured |
 
 Measured time always exceeds the budget, because the last layer always finishes — it can't be cut
 mid-layer. The budget is the deadline for *starting* another layer, not a cap on the move.
@@ -61,13 +67,33 @@ The standard error at 20 games is about ±11%, so what holds is "level 1 is clea
 level 2 next, and everything from 3 up is strong" — not a precise ranking of neighbours.
 **Levels 4 and 5 are indistinguishable against this opponent** (83% vs 80%, inside the noise): the
 opponent only gets 200 ms, so levels 3/4/5 already sit at the ceiling it allows, and going deeper
-wins nothing more. The only lever that would separate 4 from 5 is more time (say 600 / 1500 ms).
+wins nothing more. The only lever that would separate 4 from 5 is more time — levels 6 and 7
+(2000 / 5000 ms) are exactly that, but this opponent can no longer measure the difference. Tuning
+Skill Level or the node cap does nothing.
 
 The same parameters were measured before the WASM engine, using `go movetime`, against ElephantEye
 and against Fairy-Stockfish 1.1 (also 200 ms each): 0/10/65/70/80% and 0/8/63/78/85%. Two
 unrelated engines giving a monotonic ladder is the reason to believe the ladder rather than one
 opponent. Switching to layer-by-layer widened the gap at the bottom instead (13/30 rather than
 0/10), because each move now really does spend seventy-odd extra milliseconds.
+
+Levels 6 and 7 were not run through that 20-game table, for the reason just given — measuring them
+against it would just return the same 80%. Their difference is depth, measured on 11 identical
+positions (an ElephantEye self-play
+game, sampled every 4 plies), each level starting cold (`ucinewgame`, no hand-me-down from the
+previous move):
+
+| Level | Avg ply | Deepest | Actual per move | Longest layer |
+|---|---|---|---|---|
+| 5 (1000 ms / 400k) | 17.8 | 20 | 1214 ms | 563 ms |
+| 6 (2000 ms / 1M) | 20.5 | 23 | 2677 ms | 1292 ms |
+| 7 (5000 ms / 2M) | 23.7 | 26 | 6037 ms | 2811 ms |
+
+Every 2.2× the budget buys about +3 ply, which is the right order of magnitude for "nodes double
+every two ply". The actual move again runs about a fifth over the budget, for the same reason as
+above: the budget only decides whether to *start* another layer, and the last layer always finishes
+— and at levels 6 and 7 that last layer is expensive in itself (see "Keeping the interface
+responsive").
 
 Skill Level is the engine's internal strength-limiter, not "search fewer plies": it is active
 whenever `level < 20`, and it picks a noisy move out of the MultiPV list at ply `1 + level`
@@ -91,10 +117,13 @@ Three constraints decide the shape of this code; the build chain and how to reco
    page for a full second and the live readout never ticks once. So `js/engine.js` sends
    `go depth 1`, `2`, `3`…, yielding one macrotask (`setTimeout(0)`) between layers so the
    browser can paint a frame and clicks aren't swallowed. It stops when the accumulated wall
-   clock passes the level's budget; each layer also has a hard 400,000-node cap as a bound on
-   "how long the main thread blocks at once" — layer costs are wildly uneven, most layers
-   1-3 ms while the deep ones run to a few hundred (measured distribution in the table below).
-   Don't replace this with repeated
+   clock passes the level's budget; each layer also has a node cap as a bound on "how long the main
+   thread blocks at once" — layer costs are wildly uneven, most layers 1-3 ms while the deep ones
+   run to a few hundred (measured distribution in the table below). That cap is also the ceiling on
+   depth: at about 750k nodes/s, 400k means half a second per layer, and once a layer is cut the
+   deepening stops — so raising the time budget alone buys nothing (measured: a 5-second level
+   stopped at 2.9 s and ply 20). Levels 6 and 7 therefore raise the per-layer cap to 1M/2M, and the
+   longest single block grows with it. Don't replace this with repeated
    `go nodes N`: measured, each slice is an independent search, depth bounces between 13 and 17
    and bestmove changes every slice, which would reduce levels 4 and 5 to 0.1-second strength.
 3. **Positions travel as FEN.** `rules.js`'s `fen()` writes standard xiangqi FEN (rows in board
@@ -112,19 +141,24 @@ The engine runs on the main thread, but issuing one layer at a time leaves a yie
 layer (see above). Per-layer cost is measured — the shipped issuing scheme, the same fixed openings
 against ElephantEye, run under Node so the browser yield is not included:
 
-| Budget | Plies per move | median layer | p90 | p99 | longest layer | whole move |
-|---|---|---|---|---|---|---|
-| 200 ms | 24.7 (median 19) | 1 ms | 20 ms | 299 ms | 510 ms | 335 ms |
-| 600 ms | 39.8 (median 24) | 2 ms | 33 ms | 340 ms | 443 ms | 695 ms |
-| 1000 ms | 55.4 (median 24) | 3 ms | 26 ms | 416 ms | 470 ms | 1036 ms |
+| Budget / node cap | Moves | Plies per move | median layer | p90 | p99 | longest layer | whole move |
+|---|---|---|---|---|---|---|---|
+| 200 ms / 400k | 100 | 18.1 (median 18) | 1 ms | 45 ms | 368 ms | 572 ms | 358 ms |
+| 600 ms / 400k | 71 | 21.2 (median 21) | 1 ms | 122 ms | 471 ms | 598 ms | 802 ms |
+| 1000 ms / 400k | 76 | 32.6 (median 22) | 3 ms | 84 ms | 467 ms | 653 ms | 1103 ms |
+| 2000 ms / 1M | 59 | 41.6 (median 25) | 4 ms | 86 ms | 995 ms | 1481 ms | 2188 ms |
+| 5000 ms / 2M | 76 | 44.6 (median 31) | 3 ms | 251 ms | 1904 ms | 2341 ms | 4888 ms |
 
-Most layers cost 1-3 ms and nearly all the time goes into the last few: the final layer is 62% of
-the move at the 200 ms level and 29% at 1000 ms. The 400,000-node cap keeps the longest layer under
-about 0.5 s in practice, but it is soft — the engine only re-checks the node count every 390 root
-moves, so it overshoots. In the browser each layer also pays one `setTimeout(0)`, and nested timers
-are clamped to at least 4 ms. Measured in the page: a 1.20-second level-5 think refreshed the
-readout three times (262 / 514 / 1203 ms), and that half second is the longest single block, so
-animation and clicks go dull for it and behave normally outside it.
+Most layers cost 1-3 ms and nearly all the time goes into the last few: the final layer is 65% of
+the move at the 200 ms level and 31% at 5000 ms. The 400k cap keeps the longest layer under about
+0.6 s in practice, but it is soft — the engine only re-checks the node count every 390 root moves,
+so it overshoots. Relax it to 1M/2M and the longest layer follows, to 1.5 s and 2.3 s; and the
+"long" layers stop being rare: 15 out of 1807 at 200 ms becomes 254 out of 3387 (7.5%) at
+5000 ms. In the browser each layer also pays one `setTimeout(0)`, and nested timers are clamped to
+at least 4 ms. Measured in the page: a 1.20-second level-5 think refreshed the readout three times
+(262 / 514 / 1203 ms) with a half-second worst block; level 6 took 2.83 s, five refreshes, worst
+block 0.84 s; level 7 took 6.16 s, nine refreshes (ply 12→14→16→17→18→20→22), worst block 1.8 s.
+Animation and clicks go dull during those blocks and behave normally outside them.
 
 Undo, restart and changing the level mark the current think as dead: the layer already running
 finishes and then it stops, and it **never sends another `go`** — otherwise it would fight the
