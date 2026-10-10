@@ -14,6 +14,11 @@ load module scripts and module workers over `file://` — that would force you t
 local server. As it is, the whole folder can be copied anywhere and opened in any browser.
 Serving it works exactly the same.
 
+The engine travels the same way: its `.wasm` is inlined as base64 in `engine/wasm64.js`
+(707,854 B, 255,173 B gzipped), because `fetch` and XHR are blocked under `file://` too. The
+price is parsing 700 KB of extra text on first load; the gain is one folder and nothing to
+download.
+
 ## How to play
 
 - Click one of your pieces and the board marks every square it can legally reach right now
@@ -21,8 +26,8 @@ Serving it works exactly the same.
   move there. Hovering shows a translucent preview.
 - Clicking a different one of your pieces just reselects it, with no error; clicking
   somewhere unreachable clears the selection and says so.
-- The right-hand panel switches difficulty (Low / Medium / High) and whether you play Red
-  (first move) or Black (second).
+- The right-hand panel switches difficulty (levels 1-5, 1 being the weakest) and whether you
+  play Red (first move) or Black (second).
 - Undo takes back one of your moves and one of the opponent's. Restart is always available,
   and you can undo after a win or a loss to carry on playing.
 - Changing sides starts a new game. Difficulty can be changed mid-game; if the computer is
@@ -31,203 +36,114 @@ Serving it works exactly the same.
   four buttons export the game to a txt file, import one back, or copy the record to the system
   clipboard and restore it from there.
 
-## The three difficulty levels
+## The five difficulty levels
 
-| Level | Search | Root candidates | Quiescence | Time budget | Behaviour |
+The computer is the single-threaded WASM build of Pikafish-HCE in `engine/`. The five levels
+move only two knobs: the engine's own Skill Level (its strength-limiters) and the time budget
+per move.
+
+The table below is measured with **the scheme the shipped code uses** (layer-by-layer `go depth`,
+see the next section): opponent ElephantEye 3.31 on the same 200 ms limit, 20 games, eight fixed
+openings with colours alternated, zero illegal moves, zero timeouts.
+
+| Level | Skill Level | Budget | Measured per move | Avg ply | Score |
 |---|---|---|---|---|---|
-| Low | 2 ply | 10 | off | 120 ms | 35% of the time ignores the search entirely and plays a random legal move |
-| Medium | iterative deepening to 8 ply | 24 | 4 ply of captures | 900 ms | picks at random among moves within 25 points of the best |
-| High | iterative deepening to 14 ply | 128 | 5 ply of captures | 6 s | no randomness, at most about 6 s per move |
+| 1 | 5 | 200 ms | 276 ms | 18.0 | 13% (0-5-15) |
+| 2 | 8 | 200 ms | 278 ms | 15.9 | 30% (0-12-8) |
+| 3 | 20 | 200 ms | 316 ms | 24.1 | 73% (9-11-0) |
+| 4 | 20 | 600 ms | 729 ms | 34.4 | 83% (13-7-0) |
+| 5 | 20 | 1000 ms | 1000 ms | 36.3 | 80% (12-8-0) |
 
-All three levels run the same pipeline; the profile only changes how deep it goes, how much
-of the machinery is switched on, and how much randomness is mixed in at the end. Inner nodes
-are no longer capped in how many moves they search — they used to drop everything past the
-32nd quiet move with no re-search, which was a quiet way to hand over a piece. Late-move
-reduction (shallow first, re-search if it beats alpha) does that job now.
+Measured time always exceeds the budget, because the last layer always finishes — it can't be cut
+mid-layer. The budget is the deadline for *starting* another layer, not a cap on the move.
 
-### Scoring a position
+The standard error at 20 games is about ±11%, so what holds is "level 1 is clearly the weakest,
+level 2 next, and everything from 3 up is strong" — not a precise ranking of neighbours.
+**Levels 4 and 5 are indistinguishable against this opponent** (83% vs 80%, inside the noise): the
+opponent only gets 200 ms, so levels 3/4/5 already sit at the ceiling it allows, and going deeper
+wins nothing more. The only lever that would separate 4 from 5 is more time (say 600 / 1500 ms).
 
-Material, plus a piece-square table, plus a small set of pattern bonuses:
+The same parameters were measured before the WASM engine, using `go movetime`, against ElephantEye
+and against Fairy-Stockfish 1.1 (also 200 ms each): 0/10/65/70/80% and 0/8/63/78/85%. Two
+unrelated engines giving a monotonic ladder is the reason to believe the ladder rather than one
+opponent. Switching to layer-by-layer widened the gap at the bottom instead (13/30 rather than
+0/10), because each move now really does spend seventy-odd extra milliseconds.
 
-| Piece | Value |
-|---|---|
-| Chariot (車) | 900 |
-| Cannon (炮) | 470 |
-| Horse (馬) | 420 |
-| Elephant (相) | 220 |
-| Advisor (仕) | 200 |
-| Soldier (兵 / 卒) | 100 |
-| General (將 / 帥) | not scored |
+Skill Level is the engine's internal strength-limiter, not "search fewer plies": it is active
+whenever `level < 20`, and it picks a noisy move out of the MultiPV list at ply `1 + level`
+(S5 picks at ply 6, S8 at ply 9) — and if the search never got that deep, noise is still injected
+unconditionally when the search wraps up. So levels 1 and 2 calculate just as fast as level 3;
+they simply **pick a deliberately worse move**. That is where the blunders come from. Levels
+3/4/5 have no randomness at all and differ only in how deep they get.
 
-Leaving the generals unscored is deliberate: they are always on the board, so scoring them
-would only add a constant to both sides. Hanging the general is handled by the search instead —
-blocked at the root by the legal-move filter, and deeper in the tree by the "capture the general
-and you win" score.
+## How the engine is wired in
 
-The piece-square tables are written from Red's point of view as 10 rows × 9 columns, and
-flipped vertically when looked up for Black. Bonuses sit on top of the material value, so a
-soldier's worth changes continuously with where it is: barely anything before it crosses the
-river, rising as it pushes toward the centre afterwards, worth over a hundred points more at
-its best square than at its worst. That is what makes the engine willing to advance soldiers.
+Three constraints decide the shape of this code; the build chain and how to recompile are in
+[engine/README.md](engine/README.md).
 
-**Pattern bonuses** (on top of material, on the same scale: soldier = 100, chariot = 900):
+1. **The `.wasm` is inlined as base64.** The game has to run from a double-clicked
+   `index.html`, and under `file://` Chrome/Edge block `fetch` and XHR, so the `.wasm` cannot be
+   fetched by URL. `engine/wasm64.js` is `pikafish-hce.wasm` as base64 (530,804 B → 707,854 B of
+   text, 255,173 B gzipped), injected through emscripten's `instantiateWasm`. That is the only
+   size cost of this change.
+2. **One think is issued layer by layer.** This build yields only where it reads a command, so a
+   single `go` holds the main thread from start to `bestmove` — `go movetime 1000` freezes the
+   page for a full second and the live readout never ticks once. So `js/engine.js` sends
+   `go depth 1`, `2`, `3`…, yielding one macrotask (`setTimeout(0)`) between layers so the
+   browser can paint a frame and clicks aren't swallowed. It stops when the accumulated wall
+   clock passes the level's budget; each layer also has a hard 400,000-node cap as a bound on
+   "how long the main thread blocks at once" — layer costs are wildly uneven, most layers
+   1-3 ms while the deep ones run to a few hundred (measured distribution in the table below).
+   Don't replace this with repeated
+   `go nodes N`: measured, each slice is an independent search, depth bounces between 13 and 17
+   and bestmove changes every slice, which would reduce levels 4 and 5 to 0.1-second strength.
+3. **Positions travel as FEN.** `rules.js`'s `fen()` writes standard xiangqi FEN (rows in board
+   order, file 0 → `a`, uppercase for Red), and the ICCS move the engine returns is mapped back
+   with `r = 9 - digit`. That seam was checked against the engine's own `go perft`: js and engine
+   agree exactly on perft1 and perft2 node counts, both in the start position and in asymmetric
+   ones from a 12-ply random game.
 
-| Pattern | Bonus | Notes |
-|---|---|---|
-| Cannon on an open general file | 80 | The cannon shares a file with the enemy general with nothing between them. Material alone never looked at the generals, so having the general pinned like this used to be invisible |
-| Horse in the palace centre | −50 | A horse stuck on its own palace square; that PST cell was flattened to 0 at the same time so the same fact is not charged twice |
-| Chariot on an open / half-open file | 25 / 12 | No friendly soldier on that file; open means neither side has one |
-| Full advisors and elephants | +24 midgame / −43 endgame | Below 2600 combined chariot+horse+cannon material the position counts as an endgame, where full guards get in the way |
-| Soldier past the river | +12 per missing pair of the opponent's guards | Only the increment; soldiers are not repriced |
+If the engine fails to come up, the status line says so (`引擎异常:…`) instead of hanging
+silently.
 
-Sunken cannons, chestnut-corner horses, sunken chariots and crossed soldiers are already priced
-into the piece-square tables, so they get no separate term — counting one fact twice is worse
-than not counting it.
+## Keeping the interface responsive
 
-These bonuses are **depth-dependent**. The same weights make the engine weaker at 60k nodes per
-move (39–42% in self-play) and clearly stronger at 400k (about 60%): knowledge only pays back
-once the search is deep enough to use it. At Low's 2 ply they are mostly noise — what makes Low
-*low* is the 35% random roll described below.
+The engine runs on the main thread, but issuing one layer at a time leaves a yield between every
+layer (see above). Per-layer cost is measured — the shipped issuing scheme, the same fixed openings
+against ElephantEye, run under Node so the browser yield is not included:
 
-### The search
+| Budget | Plies per move | median layer | p90 | p99 | longest layer | whole move |
+|---|---|---|---|---|---|---|
+| 200 ms | 24.7 (median 19) | 1 ms | 20 ms | 299 ms | 510 ms | 335 ms |
+| 600 ms | 39.8 (median 24) | 2 ms | 33 ms | 340 ms | 443 ms | 695 ms |
+| 1000 ms | 55.4 (median 24) | 3 ms | 26 ms | 416 ms | 470 ms | 1036 ms |
 
-Negamax with alpha-beta pruning, iterating by depth: 1 ply, 2 ply, 3 ply … up to the
-profile's depth cap or until the time budget runs out. When a depth does not finish, the
-previous depth's conclusion is kept as-is, so the depth reported is always one that actually
-**completed**.
+Most layers cost 1-3 ms and nearly all the time goes into the last few: the final layer is 62% of
+the move at the 200 ms level and 29% at 1000 ms. The 400,000-node cap keeps the longest layer under
+about 0.5 s in practice, but it is soft — the engine only re-checks the node count every 390 root
+moves, so it overshoots. In the browser each layer also pays one `setTimeout(0)`, and nested timers
+are clamped to at least 4 ms. Measured in the page: a 1.20-second level-5 think refreshed the
+readout three times (262 / 514 / 1203 ms), and that half second is the longest single block, so
+animation and clicks go dull for it and behave normally outside it.
 
-The search runs on **pseudo-legal moves** and returns a win when it captures the opponent's
-general. That saves the "make the move, then check whether my own general is attacked" pass at
-every node, and self-destructive moves knock themselves out on score alone. Only the root
-uses the full legal move list — the score sheet and the interface must never show an
-illegal move.
-
-Four things make the depth affordable:
-
-- **Transposition table** — 1,048,576 direct-mapped slots keyed by a Zobrist hash split into
-  two 32-bit integers. A slot only counts if both halves match, and a collision just
-  overwrites it. Score, depth and "exact or bound" are packed into one `Int32Array`; the best
-  move goes in another. The table is not cleared between games — a generation counter is
-  incremented instead, so stale entries expire on generation mismatch.
-- **Move ordering** — every node searches the move recorded in the table first, then captures
-  (ordered by victim value minus attacker value), then two killer moves, then the history
-  table. Most of alpha-beta's pruning comes from that order.
-- **Null move** — when not in check, at depth 3 or more, and the static score already clears
-  beta, the engine lets the opponent move once and searches again. If it still clears beta,
-  the position was good enough that it did not need a careful count. Null move saves far more
-  depth than the errors it costs.
-- **Late-move reductions** — when not in check, moves that sorted badly and are neither captures
-  nor the move recorded in the table get searched one or two plies shallower first, and only get a
-  full-depth re-search if they beat alpha. Once the ordering is trustworthy this costs almost no
-  strength.
-
-Wins are scored `30000 − ply`, so mate in three beats mate in seven and the engine will not
-shuffle around in a position it has already won. Before a win score is stored in the table it
-is shifted back by the depth, otherwise the same position reached along two paths would carry
-two different scores because the ply differs.
-
-**On lookup, a win score ignores the stored depth**: a mate in three proved at depth 2 is still
-true at depth 8. Win scores used to be gated by "stored depth ≥ current depth" like ordinary
-scores, so a mate found shallow never travelled up the tree — the most direct reason the engine
-missed mates. After the ply shift a win score always exceeds `MATE_EDGE`, so the test is free.
-
-### Quiescence and being in check
-
-Xiangqi is dense with capture tactics, and scoring at the leaves outright would let the engine
-"see the capture but not the recapture", so leaves enter a quiescence search: only captures,
-ordered by victim value, until nothing obviously profitable is left. A delta prune sits on top
-— if the static score plus the victim's value plus 150 still does not reach alpha, that move
-is skipped.
-
-**Positions in check have to be handled separately**, and this is where a xiangqi engine most
-easily runs away: when in check, "only search captures" is wrong — every evasion has to be
-searched, and there are routinely twenty or thirty of them. Give them the same depth and a
-single ply explodes to fifty million nodes. Measured at depth 4: of 50 million nodes in that
-ply, 41.6 million were inside check evasions, while the main search itself visited 541 nodes.
-
-The old fix was a budget of just 2 for *consecutive* check evasions. The trouble is that
-`qDepth` gated the capture chain and the evasions with the same knob, so in a tactical position
-the only way to survive was to cut it to 4 — buying depth by switching quiescence off, blindness
-to recaptures included. Worst case measured, under that old profile with the budget raised all
-the way to 6 seconds: a position with 31 legal moves, 29 of which lose to an immediate mate,
-**completed one single ply** and scored the losing position +20.
-
-The fix is to give the two chains separate budgets:
-
-- **The capture chain** keeps `qDepth` (5 ply on High, 4 on Medium) and is no longer dragged
-  down by evasions.
-- **Evasions are not searched in quiescence at all** (that budget is 0); the main search covers
-  them instead. A leaf that is in check gets one extra ply to get out of check, at most twice
-  along one path. The count has to be capped or `depth` stops decreasing and recursion runs away;
-  and it applies **at leaves only** — extending inner nodes as well deepens the whole tree, which
-  measurably cost three plies.
-- **Quiescence skips captures that leave the side to move in check.** Those moves are illegal
-  anyway; searching them wasted a whole subtree *and* re-triggered the evasion branch inside the
-  capture chain, which was the bulk of the explosion.
-
-The same position went from 1 ply to 7; the opening now reaches 13 ply inside the 6 second
-budget. Evasions are still ordered with the table move first.
-
-### What each level actually runs
-
-| | Low | Medium | High |
-|---|---|---|---|
-| Depth cap (ply) | 2 | 8 | 14 |
-| Root candidates | 10 | 24 | 128 |
-| Quiescence capture chain (ply) | 0 | 4 | 5 |
-| Check evasions inside quiescence | off | off | off |
-| Leaf check extension (times) | 0 | 2 | 2 |
-| Time budget | 120 ms | 900 ms | 6000 ms |
-| Transposition table | off | on | on |
-| Null move / late reductions | unreachable | on | on |
-| Blunder probability | 35% | — | — |
-| Random range | 80 points | 25 points | off |
-
-Null move and late-move reductions are not in the profile table — they only apply at depth 3
-or more, so the 2-ply Low level simply never reaches them and needs no separate switch.
-
-What actually makes Low *low* is the last two rows. After the search finishes the engine rolls
-the 35% first: if it lands, the search result is discarded entirely and a move is picked
-uniformly from the legal moves — which is why Low hands pieces over. Otherwise it keeps every
-root move within `random range` points of the best and picks one of those at random. High's
-range is 0, so the pool holds only the best move and High is deterministic. Medium's 25 points
-means it plays moves that are "just as good" rather than the same move every game.
-
-The depth cap is a cap, not a guarantee. Measured from the opening: Low 2 ply / 81 nodes;
-Medium 8 ply / 71k nodes / 0.15 s; High 13 ply / 5.69M nodes / 6 s / roughly 950k nodes per
-second. In the opening it is the 6 second budget that runs out first, not the 14-ply cap; a
-middlegame usually stops at 10 ply and a sharp tactical position at 7. The cap's job is to not
-ceiling endgames. Nodes spent on a ply that did not finish are thrown away (measured at
-46–76%), which is why the reported depth is always one that completed.
-
-### Keeping the interface responsive
-
-The search runs on the main thread but yields to the event loop roughly every 40 ms (through a
-MessageChannel, to dodge `setTimeout`'s 4 ms floor), so the interface stays responsive and
-animations keep running while the computer thinks.
-
-When interrupted, it throws a sentinel out and rewinds the position to the root. **The root's
-move loop has to be resumable**: one ply often spans several slices, and if every slice restarted
-from the root's first move, alpha would never accumulate and the whole 6 seconds would go into
-re-searching the same ply. So the root is split into begin / step / commit, and each slice picks
-up at the move it stopped on. Pending null moves have to be unwound cleanly on the way back too —
-they never enter the history, so a separate counter keeps track of them.
-
-Undo, restart and a difficulty change increment a token and set a cancel flag: a running search
-exits at its next yield point, and the callback is only accepted if the token is unchanged — so
-starting a new game while the computer is thinking does not drop a ghost piece.
+Undo, restart and changing the level mark the current think as dead: the layer already running
+finishes and then it stops, and it **never sends another `go`** — otherwise it would fight the
+brand-new search for the same output queue. The callback re-checks a token before being applied,
+so restarting mid-think doesn't leave a ghost piece on the board.
 
 While the computer thinks, the two lines under the status message refresh every 200 ms: the upper
-one carries the completed depth and the elapsed time, the lower one the positions searched, e.g.
-`电脑 · 6 层 · 1.4 秒` / `1,234,567 个局面`. Once the move lands the same two lines become the
-verdict for it, e.g. `电脑 · 9 层 · 6.00 秒` / `7,289,856 个局面`. Both report the last depth that
-**completed**, so a readout stuck at 6 ply next to a result of 7 ply is normal.
+one shows completed plies and elapsed time, the lower one the number of positions searched, e.g.
+`电脑 · 6 层 · 0.4 秒` / `1,234,567 个局面`. Once the move lands, the same two lines are replaced
+by its result. Both report the largest `info depth` seen — `info` is printed only for iterations
+that **finished**. That number can reach 245, and that is not a bogus readout: 245 is the
+iterative-deepening `MAX_PLY` ceiling, and once a mate is proven every ply past the mate distance
+costs 1-4 ms, so a 200 ms budget burns through 200+ plies. A readout one ply behind the result is
+just the 200 ms timer lagging.
 
-Both lines have a fixed height and hold their space even when empty, and neither wraps (an
-overflowing line is truncated). Thinking and finished therefore occupy exactly the same height, so
-the readout appearing or vanishing never shoves the rest of the rail up and down. The refresh runs
-on a `setTimeout` chain rather than `requestAnimationFrame` — rAF is frozen in background tabs, and
-the search is holding the main thread anyway, so rAF would not get scheduled.
+Both lines have a fixed height and hold their space even when empty, and they never wrap (they
+truncate). "Thinking" and "settled" therefore occupy the same height, so the readout appearing or
+disappearing doesn't shove the rest of the panel up and down. The refresh is a `setTimeout` chain
+rather than `requestAnimationFrame` — rAF is frozen in background tabs.
 
 ## Rules
 
@@ -402,17 +318,21 @@ no error.
 ```
 index.html        layout and the right-hand panel; scripts load at the bottom in dependency order
 css/style.css     theme tokens, responsive layout, stamp and banner animations
-js/rules.js       the 9×10 position, move generation and legality, check / mate / stalemate / repetition
+js/rules.js       the 9×10 position, move generation and legality, check / mate / stalemate / repetition, FEN for the engine
 js/notation.js    Chinese notation (炮二平五 / 前马进七)
 js/render.js      Canvas drawing and animation, including both PALETTES
 js/sound.js       Web Audio synthesized sound
-js/search.js      search: iterative-deepening alpha-beta + quiescence + transposition table + null move + pattern eval
-js/ai.js          search host: queueing and cancellation
+engine/           Pikafish-HCE compiled to single-threaded WASM, its base64 inline blob, and the build scripts
+js/engine.js      engine adapter: instantiation, UCI handshake, layer-by-layer go, ICCS decoding
+js/ai.js          engine host: one think at a time, cancellation and token checks
 js/main.js        state machine and UI events
+js/search.js      the JS search that was here before the WASM engine (iterative-deepening alpha-beta +
+                  quiescence + transposition table + null move + pattern eval). Still in the repo, but
+                  index.html no longer loads it
 ```
 
 The scripts share global scope (there is no `import`/`export`), so the load order in `index.html`
-matters: `rules → notation → render → sound → search → ai → main`. Shared scope also means
+matters: `rules → notation → render → sound → engine → ai → main`. Shared scope also means
 top-level names must not collide across files — a collision is a SyntaxError, not a warning.
 
 Only preferences (theme, difficulty, side, mute, volume) go into `localStorage`, under the key
@@ -420,3 +340,12 @@ Only preferences (theme, difficulty, side, mute, volume) go into `localStorage`,
 wrapped in `try/catch`: if it cannot be stored, preferences just last for the session.
 
 The interface is Chinese only — there is no localisation layer.
+
+## License
+
+GPL-3.0, see [LICENSE](LICENSE).
+
+`engine/` bundles a compiled build of [Pikafish-HCE](https://github.com/skystarspython/Pikafish-HCE),
+which is GPL-3.0-or-later, and a compiled build carries its source's license — so the whole
+project is GPL rather than just that folder. Provenance and the rebuild steps are in
+[engine/README.md](engine/README.md).

@@ -9,9 +9,11 @@
 const PREFS_KEY = 'xiangqi.prefs';
 
 const DIFF_HINT = {
-  low: '随手棋,会明显送子',
-  mid: '会算几步,偶尔漏着',
-  high: '算得深,下得认真',
+  '1': '几乎不计算,明显送子',
+  '2': '看几步,经常送子',
+  '3': '算得清楚,偶尔漏着',
+  '4': '算得较深,很少送子',
+  '5': '算得最深,每手约 1 秒',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -90,7 +92,7 @@ class Game {
     const vol = Number(p.volume);
     return {
       theme: p.theme === 'light' ? 'light' : 'dark',
-      level: PROFILES[p.level] ? p.level : 'mid',
+      level: TIERS[p.level] ? p.level : '3',
       side: p.side === BLACK ? BLACK : RED,
       muted: p.muted === true,
       volume: Number.isFinite(vol) ? Math.min(1, Math.max(0, vol)) : 0.7,
@@ -226,7 +228,7 @@ class Game {
   }
 
   setLevel(v) {
-    if (!PROFILES[v]) return;
+    if (!TIERS[v]) return;
     this.level = v;
     this.prefs.level = v;
     this.savePrefs();
@@ -404,6 +406,11 @@ class Game {
       if (token !== this.token) return; // 悔棋/重开/换难度之后的陈旧结果
       this.stopStatTimer();
       this.thinking(false);
+      if (res.error) {
+        this.say('引擎异常:' + res.error);
+        this.statLines('', '');
+        return;
+      }
       if (!res.move) {
         this.afterMove();
         return;

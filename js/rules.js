@@ -134,6 +134,29 @@ class Board {
   isEnemy(v, color) { return v !== EMPTY && sideOf(v) !== color; }
   findKing(color) { return this.kings[color]; }
 
+  /** 与 UCI 引擎交换局面用的标准象棋 FEN。行序按棋盘原样(r=0 是顶行,黑方底线),
+      file 0 -> 'a',大写红子;没有半回合数/吃子计数这些字段,引擎不需要。 */
+  fen() {
+    const CH = {
+      [T_KING]: 'k', [T_ADVISOR]: 'a', [T_ELEPHANT]: 'b', [T_HORSE]: 'n',
+      [T_ROOK]: 'r', [T_CANNON]: 'c', [T_PAWN]: 'p',
+    };
+    const rows = [];
+    for (let r = 0; r < ROWS; r++) {
+      let s = '', run = 0;
+      for (let f = 0; f < COLS; f++) {
+        const v = this.grid[sq(f, r)];
+        if (v === EMPTY) { run++; continue; }
+        if (run) { s += run; run = 0; }
+        const c = CH[typeOf(v)];
+        s += sideOf(v) === RED ? c.toUpperCase() : c;
+      }
+      if (run) s += run;
+      rows.push(s);
+    }
+    return rows.join('/') + ' ' + (this.current === RED ? 'w' : 'b');
+  }
+
   /* ------------------------------ move making ----------------------------- */
 
   /** m = {f, r, tf, tr}。走之前算好的记谱挂在 m.text 上,原样带进 history。 */

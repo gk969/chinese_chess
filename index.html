@@ -68,9 +68,11 @@
       <div class="group">
         <span class="label" id="difficultyLabel">难度</span>
         <div class="seg" id="difficulty" role="radiogroup" aria-labelledby="difficultyLabel">
-          <button type="button" data-v="low" role="radio" aria-checked="false">低</button>
-          <button type="button" data-v="mid" role="radio" aria-checked="true">中</button>
-          <button type="button" data-v="high" role="radio" aria-checked="false">高</button>
+          <button type="button" data-v="1" role="radio" aria-checked="false">1</button>
+          <button type="button" data-v="2" role="radio" aria-checked="false">2</button>
+          <button type="button" data-v="3" role="radio" aria-checked="true">3</button>
+          <button type="button" data-v="4" role="radio" aria-checked="false">4</button>
+          <button type="button" data-v="5" role="radio" aria-checked="false">5</button>
         </div>
         <p class="hint" id="difficultyHint"></p>
       </div>
@@ -121,13 +123,16 @@
 </div>
 
 <!-- 普通脚本(不是 module),所以双击 index.html 就能玩。共享全局作用域,
-     必须按依赖顺序加载:rules → notation → render → sound → search → ai → main。
-     顶层标识符也不能跨文件重名,否则整页 SyntaxError。 -->
+     必须按依赖顺序加载:rules → notation → render → sound → 引擎 → ai → main。
+     顶层标识符也不能跨文件重名,否则整页 SyntaxError。
+     js/search.js(旧的 JS 搜索)留在仓库里但不再加载。 -->
 <script src="js/rules.js"></script>
 <script src="js/notation.js"></script>
 <script src="js/render.js"></script>
 <script src="js/sound.js"></script>
-<script src="js/search.js"></script>
+<script src="engine/pikafish-hce.js"></script>
+<script src="engine/wasm64.js"></script>
+<script src="js/engine.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/main.js"></script>
 </body>
