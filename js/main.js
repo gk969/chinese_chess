@@ -2,21 +2,16 @@
  * 界面调度:回合流转、点选落子、悔棋、棋谱、状态栏。
  *
  * 棋的规则全在 rules.js 的 Board 里,这里只决定"什么时候让谁走、走完显示什么"。
- * 电脑搜索直接在这同一个 board 上做 make/unmake,所以搜索期间不能碰它 ——
- * 一片结束时会退回根局面,两片之间读它是安全的。
+ * 电脑搜索在它拿到的那个 board 上做 make/unmake,所以换视图(点走棋记录、切分支)
+ * 一律换掉 this.board 而不是就地改它 —— 在跑的搜索手里那份局面不会被抽走。
  */
 
 const PREFS_KEY = 'xiangqi.prefs';
 
-const DIFF_HINT = {
-  '1': '几乎不计算,明显送子',
-  '2': '看几步,经常送子',
-  '3': '算得清楚,偶尔漏着',
-  '4': '算得较深,很少送子',
-  '5': '算得深,每手约 1 秒',
-  '6': '算得更深,每手 2~3 秒',
-  '7': '算得最深,每手 5~6 秒',
-};
+/* 棋力两个旋钮直接暴露给用户:Skill Level 1~20(20 = 不加噪声),和每手时限。
+   时限给的是引擎的 go movetime,引擎自己的开销算在里面。 */
+const THINK_MS = [50, 100, 200, 500, 1000, 2000, 5000];
+const POWER_DEFAULT = { skill: 2, ms: 50 };
 
 const $ = (id) => document.getElementById(id);
 const fmtNum = (n) => n.toLocaleString('en-US');
@@ -33,10 +28,12 @@ class Game {
       statusMsg: $('statusMsg'),
       statA: $('statA'),
       statB: $('statB'),
-      difficulty: $('difficulty'),
-      difficultyHint: $('difficultyHint'),
+      skill: $('skill'),
+      think: $('think'),
       side: $('side'),
       moves: $('moves'),
+      branch: $('branch'),
+      branchRow: $('branchRow'),
       importBtn: $('importBtn'),
       exportBtn: $('exportBtn'),
       copyBtn: $('copyBtn'),
@@ -62,10 +59,16 @@ class Game {
     this.renderer.setBoard(this.board);
 
     this.human = this.prefs.side;
-    this.level = this.prefs.level;
+    this.power = { skill: this.prefs.skill, ms: this.prefs.ms };
     this.over = false;
     this.sel = null;
     this.selMoves = [];
+    /* 走棋记录是一棵树:主分支 + 从旧记录中间另起炉灶分出来的分支。moves 存 Board.history
+       里那些条目对象(带 m、v、text),this.board 永远是"选中分支前 at 手之后"那个局面,
+       由 replay 重放出来 —— 所以视图能往回跳,而在跑的搜索手里那份局面不受影响。 */
+    this.branches = [{ moves: [] }];
+    this.bi = 0;
+    this.at = 0;
     // 悔棋/重开/换难度都让已经在跑的搜索结果作废:回调时令牌不符就丢掉。
     this.token = 0;
     this.statTimer = 0;
@@ -92,9 +95,12 @@ class Game {
       p = {}; // file:// 下部分浏览器禁 localStorage:偏好就只在本次会话有效
     }
     const vol = Number(p.volume);
+    const skill = Number(p.skill);
+    const ms = Number(p.ms);
     return {
       theme: p.theme === 'light' ? 'light' : 'dark',
-      level: TIERS[p.level] ? p.level : '3',
+      skill: Number.isInteger(skill) && skill >= 1 && skill <= 20 ? skill : POWER_DEFAULT.skill,
+      ms: THINK_MS.includes(ms) ? ms : POWER_DEFAULT.ms,
       side: p.side === BLACK ? BLACK : RED,
       muted: p.muted === true,
       volume: Number.isFinite(vol) ? Math.min(1, Math.max(0, vol)) : 0.7,
@@ -112,17 +118,15 @@ class Game {
     document.documentElement.setAttribute('data-theme', theme);
     this.renderer.setTheme(theme);
 
-    for (const b of this.el.difficulty.querySelectorAll('button[data-v]')) {
-      b.setAttribute('aria-checked', String(b.dataset.v === this.prefs.level));
-    }
     for (const b of this.el.side.querySelectorAll('button[data-v]')) {
       b.setAttribute('aria-checked', String(Number(b.dataset.v) === this.prefs.side));
     }
+    this.el.skill.value = String(this.prefs.skill);
+    this.el.think.value = String(this.prefs.ms);
     this.el.mute.setAttribute('aria-checked', String(!this.prefs.muted));
     this.el.volume.value = String(Math.round(this.prefs.volume * 100));
     this.sound.setEnabled(!this.prefs.muted);
     this.sound.setVolume(this.prefs.volume);
-    this.el.difficultyHint.textContent = DIFF_HINT[this.level];
   }
 
   /* ---------------------------------- ui ----------------------------------- */
@@ -133,7 +137,24 @@ class Game {
     window.addEventListener('pointerdown', unlock, { capture: true, once: true });
     window.addEventListener('keydown', unlock, { capture: true, once: true });
 
-    this.bindSeg(this.el.difficulty, (v) => this.setLevel(v));
+    for (let s = 1; s <= 20; s++) this.el.skill.add(new Option('S' + s, s));
+    for (const ms of THINK_MS) this.el.think.add(new Option(`${ms / 1000} 秒`, ms));
+    const pickPower = () => this.setPower(Number(this.el.skill.value), Number(this.el.think.value));
+    this.el.skill.addEventListener('change', pickPower);
+    this.el.think.addEventListener('change', pickPower);
+
+    this.el.branch.addEventListener('change', () => {
+      const i = Number(this.el.branch.value);
+      this.setView(i, this.branches[i].moves.length);
+      this.say(`已切到${this.branchLabel(i)}`, '');
+    });
+
+    // 点记录不走 this.locked:复盘下完的棋是主要用法,思考中点记录本来就该打断。
+    this.el.moves.addEventListener('click', (e) => {
+      const cell = e.target.closest('button.mv');
+      if (cell) this.viewMove(+cell.dataset.i);
+    });
+
     this.bindSeg(this.el.side, (v) => {
       this.human = Number(v);
       this.prefs.side = this.human;
@@ -229,13 +250,12 @@ class Game {
     ro.observe(this.renderer.wrap);
   }
 
-  setLevel(v) {
-    if (!TIERS[v]) return;
-    this.level = v;
-    this.prefs.level = v;
+  setPower(skill, ms) {
+    this.prefs.skill = skill;
+    this.prefs.ms = ms;
+    this.power = { skill, ms };
     this.savePrefs();
-    this.el.difficultyHint.textContent = DIFF_HINT[v];
-    // 正在想的时候换难度:丢掉这一局,按新档位重新想。
+    // 正在想的时候改棋力:丢掉这一局,按新参数重新想。
     if (AI.busy && !this.over) {
       this.token++;
       AI.stop();
@@ -244,65 +264,119 @@ class Game {
     }
   }
 
-  /* ------------------------------- new / undo ------------------------------ */
+  /* ------------------------------ 分支与视图 ------------------------------ */
 
-  newGame() {
-    this.token++;
-    AI.stop();
-    this.stopStatTimer();
-    this.board.reset();
-    this.over = false;
-    this.sel = null;
-    this.selMoves = [];
-
-    this.renderer.clearWin();
-    this.renderer.setLastMove(null, null);
-    this.renderer.setCheck(-1);
-    this.thinking(false);
-    this.renderer.setSelection(null, []);
-    this.renderer.setBoard(this.board);
-
-    this.el.banner.hidden = true;
-    this.el.moves.textContent = '';
-    this.statLines('', '');
-    this.updateUndo();
-    this.syncTurn();
-    this.say(this.human === RED ? '轮到你走' : '电脑先走', '');
-
-    if (this.board.current !== this.human) this.scheduleAI();
+  /** 分支的前 at 手重放成一个新局面。make 不查合法性也不改 move 对象,所以直接喂存下来的条目。 */
+  replay(entries, at) {
+    const b = new Board();
+    for (let i = 0; i < at; i++) b.make(entries[i].m);
+    return b;
   }
 
-  undo() {
-    if (!this.board.history.length) return;
+  /** 分支前 n 手之后轮到谁:上一手是谁走的,反过来就是;第 0 手是红方。 */
+  sideToMove(entries, n) {
+    return n ? other(entries[n - 1].side) : RED;
+  }
+
+  branchLabel(i) {
+    return i === 0 ? '主分支' : '分支' + i;
+  }
+
+  /** 分支下拉:只有一条分支时整行藏掉。 */
+  renderBranchSelect() {
+    const sel = this.el.branch;
+    sel.textContent = '';
+    for (let i = 0; i < this.branches.length; i++) sel.add(new Option(this.branchLabel(i), i));
+    sel.value = String(this.bi);
+    this.el.branchRow.hidden = this.branches.length < 2;
+  }
+
+  /** 换视图的总入口:选中哪条分支、停在它前 at 手之后。 */
+  setView(bi, at) {
     this.token++;
     AI.stop();
     this.stopStatTimer();
     this.thinking(false);
     this.clearSel();
-    this.over = false;
-    this.el.banner.hidden = true;
-    this.renderer.clearWin();
 
-    // 一直撤到又轮到人类 —— 正常是两步(电脑一步 + 人类一步)。
-    do {
-      this.board.undo();
-    } while (this.board.history.length && this.board.current !== this.human);
+    this.bi = bi;
+    this.at = at;
+    const mv = this.branches[bi].moves;
+    this.board = this.replay(mv, at);
 
-    const h = this.board.history;
-    const last = h[h.length - 1];
-    this.renderer.setLastMove(
+    const r = this.renderer;
+    r.setBoard(this.board);
+    r.resetFx();
+    r.setSelection(null, []);
+    r.setHover(null);
+    r.setCheck(-1);
+    const last = at ? mv[at - 1] : null;
+    r.setLastMove(
       last ? { f: last.m.f, r: last.m.r } : null,
       last ? { f: last.m.tf, r: last.m.tr } : null,
     );
-    this.syncCheck();
+
+    const st = this.board.gameState();
+    this.over = st.over;
+    if (st.over) this.showOutcome(st, false);
+    else {
+      this.el.banner.hidden = true;
+      this.el.stamp.className = 'stamp';
+      this.statLines('', '');
+      this.syncCheck();
+    }
+
+    this.renderBranchSelect();
     this.renderMoves();
     this.updateUndo();
     this.syncTurn();
+
+    // 分支末尾正好轮到电脑是可达的(分支停在人类最后一手而该轮没有电脑那一手),
+    // 这时必须补上这一手,否则上面的 token++ 已经把旧搜索废掉,局面就死在那儿。
+    if (!this.over && this.board.current !== this.human) this.scheduleAI();
+  }
+
+  /** 点记录里任意一手 → 该轮电脑那一手之后的局面,所以视图永远轮到人类。 */
+  viewMove(i) {
+    const mv = this.branches[this.bi].moves;
+    const aiPly = this.human === RED ? (i >> 1) * 2 + 1 : (i >> 1) * 2;
+    const at = Math.min(aiPly + 1, mv.length);
+    if (at === this.at) return;
+    this.setView(this.bi, at);
+    this.say(at === mv.length ? '走到最新' : `已回到第 ${(i >> 1) + 1} 轮`, '');
+  }
+
+  /** 在旧记录中间落子 = 分一条新线:前缀照旧,后面重新长。点最后一手再落子不新建。 */
+  forkIfNeeded() {
+    const mv = this.branches[this.bi].moves;
+    if (this.at >= mv.length) return;
+    this.branches.push({ moves: mv.slice(0, this.at) });
+    this.bi = this.branches.length - 1;
+    this.at = this.branches[this.bi].moves.length;
+    this.renderBranchSelect();
+  }
+
+  /* ------------------------------- new / undo ------------------------------ */
+
+  newGame() {
+    this.branches = [{ moves: [] }];
+    this.bi = 0;
+    this.at = 0;
+    this.say(this.human === RED ? '轮到你走' : '电脑先走', '');
+    this.setView(0, 0);
+  }
+
+  undo() {
+    const mv = this.branches[this.bi].moves;
+    if (!mv.length) return;
+    // 撤的是当前分支的最后一轮,和视图停在哪儿无关:从数组尾巴弹,弹到又轮到人类。
+    do {
+      mv.pop();
+    } while (mv.length && this.sideToMove(mv, mv.length) !== this.human);
+
     this.sound.undo();
     this.say('已悔棋', '');
-
-    // 只撤了一步就把人类的开局撤没了(执黑时电脑先走过一手):让电脑重新想。
-    if (this.board.current !== this.human) this.scheduleAI();
+    this.setView(this.bi, mv.length);
   }
 
   /* --------------------------------- turns --------------------------------- */
@@ -356,6 +430,7 @@ class Game {
   }
 
   play(m) {
+    this.forkIfNeeded(); // 视图停在记录中间 → 先分一条新线,这一手就是新线的第一手
     const b = this.board;
     const from = { f: m.f, r: m.r };
     const to = { f: m.tf, r: m.tr };
@@ -365,6 +440,9 @@ class Game {
     const text = notate(b, m); // 记谱看的是走之前的盘面,必须在 make 之前算
     m.text = text;
     const cap = b.make(m);
+    const mv = this.branches[this.bi].moves;
+    mv.push(b.history[b.history.length - 1]);
+    this.at = mv.length;
 
     this.clearSel();
     this.renderer.setLastMove(from, to);
@@ -375,7 +453,7 @@ class Game {
     if (cap === EMPTY) this.sound.move(side);
     else this.sound.capture(side);
 
-    this.renderMoves();
+    this.renderMoves(true);
     this.afterMove();
   }
 
@@ -404,8 +482,8 @@ class Game {
     this.say('对方思考中…', 'thinking');
     this.startStatTimer();
 
-    AI.think(this.board, this.level, (res) => {
-      if (token !== this.token) return; // 悔棋/重开/换难度之后的陈旧结果
+    AI.think(this.board, this.power, (res) => {
+      if (token !== this.token) return; // 悔棋/重开/改棋力之后的陈旧结果
       this.stopStatTimer();
       this.thinking(false);
       if (res.error) {
@@ -434,7 +512,12 @@ class Game {
     this.renderer.setCheck(-1);
     this.clearSel();
     this.updateUndo();
+    this.showOutcome(st, true);
+  }
 
+  /** 结算显示。live = 这一手刚下完,才配音效和胜负动画;
+      导航回一个已经走完的局面(点记录、切分支、导入)只把横幅和读数补上。 */
+  showOutcome(st, live) {
     const iWon = st.winner === this.human;
     let stamp;
     let text;
@@ -443,16 +526,16 @@ class Game {
       stamp = '和';
       cls = ' draw';
       text = '同一局面重复三次,判和';
-      this.sound.draw();
+      if (live) this.sound.draw();
     } else if (iWon) {
       stamp = '胜';
       text = st.reason === 'mate' ? '将死对方' : '对方无子可走';
-      this.sound.win();
+      if (live) this.sound.win();
     } else {
       stamp = '负';
       cls = ' lose';
       text = st.reason === 'mate' ? '被将死' : '无子可走';
-      this.sound.lose();
+      if (live) this.sound.lose();
     }
 
     this.el.stamp.textContent = stamp;
@@ -460,7 +543,7 @@ class Game {
     this.el.bannerText.textContent = text;
     this.el.banner.hidden = false;
 
-    if (st.lostKing >= 0 && !this.reduceMotion) {
+    if (live && st.lostKing >= 0 && !this.reduceMotion) {
       this.renderer.startWin({ f: fileOf(st.lostKing), r: rankOf(st.lostKing) }, iWon);
     }
     this.statLines(st.reason === 'repetition' ? '重复局面三次' : st.reason === 'mate' ? '将死' : '困毙', '');
@@ -525,7 +608,7 @@ class Game {
   }
 
   updateUndo() {
-    const has = !!this.board.history.length;
+    const has = !!this.branches[this.bi].moves.length;
     this.el.undo.disabled = !has || AI.busy;
     this.el.exportBtn.disabled = !has;
     this.el.copyBtn.disabled = !has;
@@ -533,9 +616,10 @@ class Game {
 
   /* -------------------------------- 棋谱进出 -------------------------------- */
 
-  /** 按回合排成 "1. 炮二平五 砲2进7"。导入时序号会被剥掉,所以怎么写都能读回来。 */
+  /** 按回合排成 "1. 炮二平五 砲2进7"。导入时序号会被剥掉,所以怎么写都能读回来。
+      只出选中分支 —— 下拉停在哪儿就导出哪儿。 */
   movesText() {
-    const h = this.board.history;
+    const h = this.branches[this.bi].moves;
     const lines = [];
     for (let i = 0; i < h.length; i += 2) {
       const red = h[i] ? h[i].text || '·' : '';
@@ -601,7 +685,8 @@ class Game {
       return;
     }
     // 文件和粘贴都汇到这儿,所以确认写在这里才两边都拦得住。
-    if (this.board.history.length && !this.over && !confirm('导入会替换当前对局,继续?')) return;
+    const dirty = this.branches.some((br) => br.moves.length) && !this.over;
+    if (dirty && !confirm('导入会替换当前对局和所有分支,继续?')) return;
 
     const b = new Board();
     for (let i = 0; i < tokens.length; i++) {
@@ -616,33 +701,10 @@ class Game {
       b.make(m);
     }
 
-    this.token++;
-    AI.stop();
-    this.stopStatTimer();
-    this.thinking(false);
-    this.board = b;
-    this.over = false;
-    this.sel = null;
-    this.selMoves = [];
-
-    const last = b.history[b.history.length - 1];
-    this.renderer.setBoard(b);
-    this.renderer.clearWin();
-    this.renderer.setCheck(-1);
-    this.renderer.setSelection(null, []);
-    this.renderer.setLastMove({ f: last.m.f, r: last.m.r }, { f: last.m.tf, r: last.m.tr });
-
-    this.el.banner.hidden = true;
-    this.statLines('', '');
-    this.renderMoves();
-    this.syncCheck();
-    this.updateUndo();
-    this.syncTurn();
+    // 导入清空所有分支,只留这一条;走通了才换,半途报错棋盘不动。
+    this.branches = [{ moves: b.history.slice() }];
+    this.setView(0, b.history.length);
     this.say(`已导入 ${tokens.length} 手`, '');
-
-    const st = b.gameState();
-    if (st.over) this.finish(st);
-    else if (b.current !== this.human) this.scheduleAI();
   }
 
   async copyMoves() {
@@ -697,11 +759,12 @@ class Game {
     }, { once: true });
   }
 
-  /** 棋谱每次整体重建:悔棋要缩短它,重建成本来就不长,比做增量对账省事。 */
-  renderMoves() {
-    const h = this.board.history;
+  /** 棋谱每次整体重建:悔棋要缩短它,导航要挪高亮,重建成本来就不长,比做增量对账省事。
+      数据源是选中分支的完整记录;at 之后的那些手照样列出来,但变灰 —— 棋盘还没走到那儿。 */
+  renderMoves(flash) {
+    const h = this.branches[this.bi].moves;
     const frag = document.createDocumentFragment();
-    let last = null;
+    let now = null;
     for (let i = 0; i < h.length; i++) {
       if (i % 2 === 0) {
         const no = document.createElement('span');
@@ -709,18 +772,21 @@ class Game {
         no.textContent = String((i >> 1) + 1);
         frag.appendChild(no);
       }
-      const cell = document.createElement('span');
-      cell.className = 'mv' + (sideOf(h[i].v) === RED ? ' red' : '');
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = 'mv' + (sideOf(h[i].v) === RED ? ' red' : '') + (i >= this.at ? ' future' : '');
       cell.textContent = h[i].text || '·';
+      cell.dataset.i = String(i);
       frag.appendChild(cell);
-      last = cell;
+      if (i === this.at - 1) now = cell;
     }
     this.el.moves.textContent = '';
     this.el.moves.appendChild(frag);
-    if (!last) return;
-    last.classList.add('now');
-    if (!this.reduceMotion) last.classList.add('flash');
-    this.el.moves.scrollTop = this.el.moves.scrollHeight;
+    if (!now) return;
+    now.classList.add('now');
+    if (flash && !this.reduceMotion) now.classList.add('flash');
+    const box = this.el.moves;
+    box.scrollTop = Math.max(0, now.offsetTop - box.clientHeight / 2);
   }
 }
 

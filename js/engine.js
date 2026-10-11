@@ -15,16 +15,6 @@
  * 代价是主线程会被一手棋占住。
  */
 
-const TIERS = {
-  '1': { skill: 5,  ms: 200 },
-  '2': { skill: 8,  ms: 200 },
-  '3': { skill: 20, ms: 200 },
-  '4': { skill: 20, ms: 600 },
-  '5': { skill: 20, ms: 1000 },
-  '6': { skill: 20, ms: 2000 },
-  '7': { skill: 20, ms: 5000 },
-};
-
 const Engine = {
   sf: null,        // 页内实例化时才用
   worker: null,
@@ -178,9 +168,11 @@ const Engine = {
     ) || null;
   },
 
-  /** 返回 { current, done }。current 上的 completeDepth/nodes/started 是给状态栏读的。 */
-  think(board, tier) {
-    const t = TIERS[tier] || TIERS['3'];
+  /**
+   * power = { skill, ms } —— 界面上"电脑棋力"那两个下拉直接交过来,这里不再有档位表。
+   * 返回 { current, done }。current 上的 completeDepth/nodes/started 是给状态栏读的。
+   */
+  think(board, power) {
     const s = {
       completeDepth: 0,
       nodes: 0,
@@ -194,20 +186,20 @@ const Engine = {
         if (Engine.mode === 'worker') Engine.reboot();
       },
     };
-    const done = this.run(board, t, s).then((res) => (s.dead ? null : res));
+    const done = this.run(board, power, s).then((res) => (s.dead ? null : res));
     return { current: s, done };
   },
 
-  async run(board, t, s) {
+  async run(board, power, s) {
     await this.whenReady();
     // 引擎还在 boot 时这一手就被 cancel 掉的话,会一直挂在 waiters 里;重起完成时它会被
     // 唤醒,那就得在这儿收手 —— 否则会给新引擎补发一条 go,和新那手抢同一条输出队列。
     if (s.dead) return null;
 
     const t0 = performance.now();
-    this.send('setoption name Skill Level value ' + t.skill);
+    this.send('setoption name Skill Level value ' + power.skill);
     this.send('position fen ' + board.fen());
-    this.send('go movetime ' + t.ms);
+    this.send('go movetime ' + power.ms);
 
     let best = '';
     for (;;) {

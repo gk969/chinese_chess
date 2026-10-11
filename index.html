@@ -66,17 +66,15 @@
       </div>
 
       <div class="group">
-        <span class="label" id="difficultyLabel">难度</span>
-        <div class="seg" id="difficulty" role="radiogroup" aria-labelledby="difficultyLabel">
-          <button type="button" data-v="1" role="radio" aria-checked="false">1</button>
-          <button type="button" data-v="2" role="radio" aria-checked="false">2</button>
-          <button type="button" data-v="3" role="radio" aria-checked="true">3</button>
-          <button type="button" data-v="4" role="radio" aria-checked="false">4</button>
-          <button type="button" data-v="5" role="radio" aria-checked="false">5</button>
-          <button type="button" data-v="6" role="radio" aria-checked="false">6</button>
-          <button type="button" data-v="7" role="radio" aria-checked="false">7</button>
+        <span class="label">电脑棋力</span>
+        <div class="power">
+          <label class="pw"><span>智力</span>
+            <select id="skill" aria-label="电脑智力,对应引擎的 Skill Level"></select>
+          </label>
+          <label class="pw"><span>思考</span>
+            <select id="think" aria-label="每手思考时间"></select>
+          </label>
         </div>
-        <p class="hint" id="difficultyHint"></p>
       </div>
 
       <div class="group">
@@ -107,6 +105,10 @@
       <!-- 棋谱放最下面,吃掉栏里剩下的高度:它是唯一长度可变的块。 -->
       <div class="group grow">
         <span class="label">走棋记录</span>
+        <!-- 只有一条分支时整行藏掉,分出来第二条才出现。 -->
+        <label class="pw" id="branchRow" hidden><span>分支</span>
+          <select id="branch" aria-label="选择走棋分支"></select>
+        </label>
         <div class="moves-tools">
           <button type="button" class="btn sm" id="importBtn">导入</button>
           <button type="button" class="btn sm" id="exportBtn" disabled>导出</button>

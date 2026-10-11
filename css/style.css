@@ -269,13 +269,6 @@ canvas.thinking { cursor: progress; }
   letter-spacing: 0.08em;
 }
 
-.hint {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--muted);
-}
-
 .seg {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -284,8 +277,47 @@ canvas.thinking { cursor: progress; }
 
 .seg.side { grid-template-columns: 1fr 1fr; }
 
-/* 难度七档,比 .seg 默认的三列宽。按钮里只有一个数字,七列也不挤。 */
-#difficulty.seg { grid-template-columns: repeat(7, 1fr); }
+/* 电脑棋力一行两个下拉:左边 Skill Level,右边每手时限。 */
+.power { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+.pw { position: relative; display: flex; align-items: center; gap: 6px; }
+/* 浏览器给 [hidden] 的 display:none 是 UA 样式,被上面这条类选择器盖掉。 */
+.pw[hidden] { display: none; }
+.pw > span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.pw::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin-top: -4px;
+  border-right: 1.4px solid var(--muted);
+  border-bottom: 1.4px solid var(--muted);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.pw select {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  padding: 8px 22px 8px 8px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.pw select:hover { border-color: var(--line-2); }
+.pw select:focus-visible { outline: 2px solid var(--cinnabar-dim); outline-offset: 1px; }
+
+/* 展开的那一列在 Windows 上按 option 自己的底色画,不指定就永远是系统白底。 */
+.pw option { color: var(--paper); background: var(--slate); }
 
 .seg button {
   appearance: none;
@@ -317,18 +349,27 @@ canvas.thinking { cursor: progress; }
 .moves-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 
 .moves {
+  /* 行高写死。网格的 auto 行在容器被压矮时会缩到只剩行框高(实测侧栏一矮就从 23px 掉到 17px),
+     而按钮带 overflow:hidden,汉字就被上下切掉 —— 所以行高不能由可用高度决定。 */
+  --row: 24px;
   display: grid;
   grid-template-columns: 2.4em 1fr 1fr;
+  grid-auto-rows: var(--row);
   gap: 1px 8px;
   align-content: start;
   flex: 1 1 auto;
-  min-height: 72px;
+  /* 最矮就是三整行:3×24 + 2 条 1px 行距,再加 1px 上边框和 8px 上内边距(box-sizing 是
+     border-box,这两笔算在 min-height 里面)。再矮就要切掉第三行的字。 */
+  min-height: calc(var(--row) * 3 + 2px + 9px);
   overflow-y: auto;
   scrollbar-width: thin;
   font-variant-numeric: tabular-nums;
   font-size: 13px;
+  line-height: calc(var(--row) - 6px);
   border-top: 1px solid var(--line);
   padding-top: 8px;
+  /* 条目要按 offsetTop 算滚动位置,父元素得是定位上下文。 */
+  position: relative;
 }
 
 .moves:empty::after {
@@ -341,19 +382,40 @@ canvas.thinking { cursor: progress; }
 .moves .no {
   color: var(--muted);
   text-align: right;
+  /* 序号没有上下内边距,行高得跟整行一样高才和按钮里的字对齐。 */
+  line-height: var(--row);
 }
 
+/* 每一手是个按钮:点它就跳到那一手之后的盘面。 */
 .moves .mv {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-variant-numeric: inherit;
+  text-align: left;
+  min-width: 0;
+  cursor: pointer;
   padding: 3px 5px;
   border-radius: 3px;
   color: var(--paper);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color 0.15s, background 0.15s;
 }
+
+.moves .mv:hover { background: var(--hover); }
+/* 全局那条 outline-offset: 2px 在 1px 间距的网格里会被裁掉,所以往里画。 */
+.moves .mv:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 .moves .mv.red { color: var(--cinnabar); }
 .moves .mv.now { background: var(--hover); box-shadow: inset 2px 0 0 var(--cinnabar); }
+
+/* 视图停在记录中间时,后面的那些手还在列表里,但棋盘没走到那儿 —— 变灰。 */
+.moves .mv.future { color: var(--muted); }
+.moves .mv.future.red { color: var(--cinnabar-dim); }
+.moves .mv.now.future { background: var(--hover); }
 
 .moves .mv.flash { animation: mvIn 0.3s ease-out both; }
 

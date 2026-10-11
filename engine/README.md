@@ -6,8 +6,9 @@
 产物名沿用上游 makefile 的 `stockfish.js` 容易让人误以为是 Stockfish 本体,已改名。
 引擎自己在 `uci` 握手里的 `id name` 是 Pikafish-HCE。
 
-对局已经由它跑:`js/engine.js` 是适配层,`js/ai.js` 是它在游戏里的入口,难度七档的参数在
-`js/engine.js` 的 `TIERS` 里。旧的 JS 搜索 `js/search.js` 留在仓库里但不再被 `index.html` 加载。
+对局已经由它跑:`js/engine.js` 是适配层,`js/ai.js` 是它在游戏里的入口。棋力两个旋钮
+(Skill Level 和 `go movetime` 的时限)没有档位表,界面上"电脑棋力"那两个下拉选到什么
+就原样传进 `Engine.think(board, { skill, ms })`。旧的 JS 搜索 `js/search.js` 留在仓库里但不再被 `index.html` 加载。
 
 ## 来源与许可
 

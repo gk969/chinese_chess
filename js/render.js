@@ -433,6 +433,14 @@ class Renderer {
     this.mark();
   }
 
+  /** 跳到另一个局面(点走棋记录、切分支)时用:排队的滑子/落子动画必须一起清掉,
+      不然它们会照着旧坐标在新盘面上插值。 */
+  resetFx() {
+    this.anims = [];
+    this.winFx = null;
+    this.mark();
+  }
+
   requestDraw() {
     if (this.raf) return;
     this.raf = requestAnimationFrame((t) => {
