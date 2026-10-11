@@ -9,15 +9,16 @@ sound is synthesized at runtime).
 
 Double-click `index.html` and play. No server, nothing to install.
 
-The scripts are plain `<script>` tags rather than ES modules, because browsers refuse to
+The scripts are plain `<script>` tags rather than ES modules, because Chrome and Edge refuse to
 load module scripts and module workers over `file://` — that would force you to stand up a
 local server. As it is, the whole folder can be copied anywhere and opened in any browser.
 Serving it works exactly the same.
 
 The engine travels the same way: its `.wasm` is inlined as base64 in `engine/wasm64.js`
-(707,854 B, 255,173 B gzipped), because `fetch` and XHR are blocked under `file://` too. The
-price is parsing 700 KB of extra text on first load; the gain is one folder and nothing to
-download.
+(707,854 B, 255,173 B gzipped), because `fetch` and XHR are blocked under `file://` too — and so is
+starting a Worker from a URL, which is why the Worker's source sits in `engine/worker64.js` as a
+plain string (22,266 B). The price is parsing 700 KB of extra text on first load; the gain is one
+folder and nothing to download.
 
 ## How to play
 
@@ -38,62 +39,66 @@ download.
 
 ## The seven difficulty levels
 
-The computer is the single-threaded WASM build of Pikafish-HCE in `engine/`. The seven levels
-move three knobs: the engine's own Skill Level (its strength-limiters), the time budget per move,
-and the node cap for a single layer. The first two are the ones that matter; the third is forced
-on us — see item 2 of the next section, where a per-layer node cap is both the bound on "how long
-the main thread blocks at once" and the ceiling on depth, so levels 6 and 7 cannot spend their
-2 and 5 seconds without relaxing it.
+The computer is the single-threaded WASM build of Pikafish-HCE in `engine/`. The seven levels move
+two knobs: the engine's own Skill Level (its strength-limiter) and the time budget per move.
 
-The table below is measured with **the scheme the shipped code uses** (layer-by-layer `go depth`,
-see the next section): opponent ElephantEye 3.31 on the same 200 ms limit, 20 games, eight fixed
+The table below is measured with **the scheme the shipped code uses** (a single `go movetime`, see
+the next section): opponent ElephantEye 3.31 on the same 200 ms limit, 20 games, eight fixed
 openings with colours alternated, zero illegal moves, zero timeouts. Scores were measured only
 through level 5; levels 6 and 7 get a separate table below, for the reason given after it.
 
-| Level | Skill Level | Budget | Node cap per layer | Measured per move | Avg ply | Score |
-|---|---|---|---|---|---|---|
-| 1 | 5 | 200 ms | 400k | 276 ms | 18.0 | 13% (0-5-15) |
-| 2 | 8 | 200 ms | 400k | 278 ms | 15.9 | 30% (0-12-8) |
-| 3 | 20 | 200 ms | 400k | 316 ms | 24.1 | 73% (9-11-0) |
-| 4 | 20 | 600 ms | 400k | 729 ms | 34.4 | 83% (13-7-0) |
-| 5 | 20 | 1000 ms | 400k | 1000 ms | 36.3 | 80% (12-8-0) |
-| 6 | 20 | 2000 ms | 1M | see below | see below | not measured |
-| 7 | 20 | 5000 ms | 2M | see below | see below | not measured |
+| Level | Skill Level | Budget | Measured per move | Avg ply | Score |
+|---|---|---|---|---|---|
+| 1 | 5 | 200 ms | 189 ms | 33.7 | **0%** (0-0-20) |
+| 2 | 8 | 200 ms | 194 ms | 26.0 | **8%** (0-3-17) |
+| 3 | 20 | 200 ms | 197 ms | 25.6 | **68%** (7-13-0) |
+| 4 | 20 | 600 ms | 577 ms | 33.1 | **80%** (12-8-0) |
+| 5 | 20 | 1000 ms | 958 ms | 36.4 | **78%** (11-9-0) |
+| 6 | 20 | 2000 ms | see below | see below | not measured |
+| 7 | 20 | 5000 ms | see below | see below | not measured |
 
-Measured time always exceeds the budget, because the last layer always finishes — it can't be cut
-mid-layer. The budget is the deadline for *starting* another layer, not a cap on the move.
+Measured time is the budget: 189 / 194 / 197 / 577 / 958 ms, slightly *under*
+200 / 200 / 200 / 600 / 1000 — `go movetime` stops dead on the dot, and the engine's own overhead
+counts inside it.
+
+The avg-ply column is *higher* at levels 1 and 2 than at level 3, and that does not mean the weak
+levels search deeper: level 1 loses all 20 games and level 2 draws only 3, so nearly every move they
+make is already lost and sits inside a forced mate sequence. In a position with a proven mate each
+extra iteration costs 1-4 ms, so the reported depth runs off into the hundreds (see
+`engine/README.md`). At the same budget what actually differs is move choice, not that column.
 
 The standard error at 20 games is about ±11%, so what holds is "level 1 is clearly the weakest,
 level 2 next, and everything from 3 up is strong" — not a precise ranking of neighbours.
-**Levels 4 and 5 are indistinguishable against this opponent** (83% vs 80%, inside the noise): the
+**Levels 4 and 5 are indistinguishable against this opponent** (80% vs 78%, inside the noise): the
 opponent only gets 200 ms, so levels 3/4/5 already sit at the ceiling it allows, and going deeper
 wins nothing more. The only lever that would separate 4 from 5 is more time — levels 6 and 7
 (2000 / 5000 ms) are exactly that, but this opponent can no longer measure the difference. Tuning
-Skill Level or the node cap does nothing.
+Skill Level does nothing.
 
-The same parameters were measured before the WASM engine, using `go movetime`, against ElephantEye
-and against Fairy-Stockfish 1.1 (also 200 ms each): 0/10/65/70/80% and 0/8/63/78/85%. Two
-unrelated engines giving a monotonic ladder is the reason to believe the ladder rather than one
-opponent. Switching to layer-by-layer widened the gap at the bottom instead (13/30 rather than
-0/10), because each move now really does spend seventy-odd extra milliseconds.
+This issuing scheme was originally calibrated against two unrelated engines: ElephantEye gave
+0/10/65/70/80% and Fairy-Stockfish 1.1 gave 0/8/63/78/85% (both at 200 ms). A monotonic ladder on
+two unrelated engines is the reason to believe the ladder rather than one opponent. The table above
+is a re-run of the same scheme, and all five levels agree with that original set
+(0/10/65/70/80% against 0/8/68/80/78%, all inside the noise).
 
 Levels 6 and 7 were not run through that 20-game table, for the reason just given — measuring them
 against it would just return the same 80%. Their difference is depth, measured on 11 identical
 positions (an ElephantEye self-play
 game, sampled every 4 plies), each level starting cold (`ucinewgame`, no hand-me-down from the
-previous move):
+previous move). That is also why the ply counts here don't line up with the table above (18.5 against
+36.4 at level 5): in a game the transposition table accumulates across moves, and a cold start gets
+no such discount.
 
-| Level | Avg ply | Deepest | Actual per move | Longest layer |
-|---|---|---|---|---|
-| 5 (1000 ms / 400k) | 17.8 | 20 | 1214 ms | 563 ms |
-| 6 (2000 ms / 1M) | 20.5 | 23 | 2677 ms | 1292 ms |
-| 7 (5000 ms / 2M) | 23.7 | 26 | 6037 ms | 2811 ms |
+| Level | Avg ply | Deepest | Shallowest | Actual per move | Avg nodes |
+|---|---|---|---|---|---|
+| 5 (1000 ms) | 18.5 | 20 | 17 | 1005 ms | 913k |
+| 6 (2000 ms) | 20.5 | 23 | 18 | 2005 ms | 1.82M |
+| 7 (5000 ms) | 24.4 | 26 | 22 | 5005 ms | 4.60M |
 
 Every 2.2× the budget buys about +3 ply, which is the right order of magnitude for "nodes double
-every two ply". The actual move again runs about a fifth over the budget, for the same reason as
-above: the budget only decides whether to *start* another layer, and the last layer always finishes
-— and at levels 6 and 7 that last layer is expensive in itself (see "Keeping the interface
-responsive").
+every two ply". The actual move is the budget: `go movetime` stops dead on the dot. That differs
+from the layer-by-layer build this replaces, which always finished the last layer it had started —
+there a 5-second budget really spent 6.0 s.
 
 Skill Level is the engine's internal strength-limiter, not "search fewer plies": it is active
 whenever `level < 20`, and it picks a noisy move out of the MultiPV list at ply `1 + level`
@@ -110,22 +115,22 @@ Three constraints decide the shape of this code; the build chain and how to reco
 1. **The `.wasm` is inlined as base64.** The game has to run from a double-clicked
    `index.html`, and under `file://` Chrome/Edge block `fetch` and XHR, so the `.wasm` cannot be
    fetched by URL. `engine/wasm64.js` is `pikafish-hce.wasm` as base64 (530,804 B → 707,854 B of
-   text, 255,173 B gzipped), injected through emscripten's `instantiateWasm`. That is the only
-   size cost of this change.
-2. **One think is issued layer by layer.** This build yields only where it reads a command, so a
-   single `go` holds the main thread from start to `bestmove` — `go movetime 1000` freezes the
-   page for a full second and the live readout never ticks once. So `js/engine.js` sends
-   `go depth 1`, `2`, `3`…, yielding one macrotask (`setTimeout(0)`) between layers so the
-   browser can paint a frame and clicks aren't swallowed. It stops when the accumulated wall
-   clock passes the level's budget; each layer also has a node cap as a bound on "how long the main
-   thread blocks at once" — layer costs are wildly uneven, most layers 1-3 ms while the deep ones
-   run to a few hundred (measured distribution in the table below). That cap is also the ceiling on
-   depth: at about 750k nodes/s, 400k means half a second per layer, and once a layer is cut the
-   deepening stops — so raising the time budget alone buys nothing (measured: a 5-second level
-   stopped at 2.9 s and ply 20). Levels 6 and 7 therefore raise the per-layer cap to 1M/2M, and the
-   longest single block grows with it. Don't replace this with repeated
-   `go nodes N`: measured, each slice is an independent search, depth bounces between 13 and 17
-   and bestmove changes every slice, which would reduce levels 4 and 5 to 0.1-second strength.
+   text, 255,173 B gzipped), injected through emscripten's `instantiateWasm`. The cost is parsing
+   those 700 KB of text on first load; the Worker below adds another 22 KB.
+2. **The engine runs in a Worker.** This build yields only where it reads a command, so a single
+   `go` holds whatever thread it lives on from start to `bestmove` — on the main thread that is a
+   frozen page. In a Worker the main thread stays alive, so one think is one clean
+   `go movetime N` with no layer slicing.
+   The Worker's source has to be a string already sitting in the page: under `file://` Chrome
+   refuses `new Worker('engine/pikafish-hce.js')` (*script cannot be accessed from origin 'null'*)
+   and refuses `importScripts` inside a blob worker. So the emscripten glue is packed by
+   `engine/build/make_worker.sh` into `engine/worker64.js` as one string
+   (`window.XQ_WORKER_JS`, 22,266 B), started from a blob: URL, and the wasm base64 is
+   `postMessage`d in afterwards. The glue was already built with
+   `-s ENVIRONMENT=web,worker,node`, so the same binary runs in a Worker with no rebuild.
+   If a Worker won't start (other browsers have further `file://` restrictions) it falls back to
+   instantiating in the page: identical search policy, at the cost of a main thread blocked for the
+   whole move.
 3. **Positions travel as FEN.** `rules.js`'s `fen()` writes standard xiangqi FEN (rows in board
    order, file 0 → `a`, uppercase for Red), and the ICCS move the engine returns is mapped back
    with `r = 9 - digit`. That seam was checked against the engine's own `go perft`: js and engine
@@ -137,33 +142,38 @@ silently.
 
 ## Keeping the interface responsive
 
-The engine runs on the main thread, but issuing one layer at a time leaves a yield between every
-layer (see above). Per-layer cost is measured — the shipped issuing scheme, the same fixed openings
-against ElephantEye, run under Node so the browser yield is not included:
+The engine is in a Worker, so a move of any length leaves the main thread alone. Measured on
+`file://` from a double-clicked `index.html` (headless Chrome, 1280×900, a
+`requestAnimationFrame` counter running in the page):
 
-| Budget / node cap | Moves | Plies per move | median layer | p90 | p99 | longest layer | whole move |
-|---|---|---|---|---|---|---|---|
-| 200 ms / 400k | 100 | 18.1 (median 18) | 1 ms | 45 ms | 368 ms | 572 ms | 358 ms |
-| 600 ms / 400k | 71 | 21.2 (median 21) | 1 ms | 122 ms | 471 ms | 598 ms | 802 ms |
-| 1000 ms / 400k | 76 | 32.6 (median 22) | 3 ms | 84 ms | 467 ms | 653 ms | 1103 ms |
-| 2000 ms / 1M | 59 | 41.6 (median 25) | 4 ms | 86 ms | 995 ms | 1481 ms | 2188 ms |
-| 5000 ms / 2M | 76 | 44.6 (median 31) | 3 ms | 251 ms | 1904 ms | 2341 ms | 4888 ms |
+| Level | Actual per move | Frames | Worst frame | Readout refreshes |
+|---|---|---|---|---|
+| 3 (200 ms) | 209 ms | 13 | 17 ms | 2 |
+| 7 (5000 ms) | 5045 ms | 303 | 18-66 ms | 26 |
 
-Most layers cost 1-3 ms and nearly all the time goes into the last few: the final layer is 65% of
-the move at the 200 ms level and 31% at 5000 ms. The 400k cap keeps the longest layer under about
-0.6 s in practice, but it is soft — the engine only re-checks the node count every 390 root moves,
-so it overshoots. Relax it to 1M/2M and the longest layer follows, to 1.5 s and 2.3 s; and the
-"long" layers stop being rare: 15 out of 1807 at 200 ms becomes 254 out of 3387 (7.5%) at
-5000 ms. In the browser each layer also pays one `setTimeout(0)`, and nested timers are clamped to
-at least 4 ms. Measured in the page: a 1.20-second level-5 think refreshed the readout three times
-(262 / 514 / 1203 ms) with a half-second worst block; level 6 took 2.83 s, five refreshes, worst
-block 0.84 s; level 7 took 6.16 s, nine refreshes (ply 12→14→16→17→18→20→22), worst block 1.8 s.
-Animation and clicks go dull during those blocks and behave normally outside them.
+303 frames inside 5045 ms is a full 60 fps — animation and clicks stay normal throughout. The worst
+frame measured 18 ms in one run and 66 ms in another; the only difference is how busy the machine was
+at the time — a search saturates the core the worker sits on, and the compositor thread gets squeezed.
+In both runs a 50 ms interval fired its expected 101 times, so the readout never missed a beat.
 
-Undo, restart and changing the level mark the current think as dead: the layer already running
-finishes and then it stops, and it **never sends another `go`** — otherwise it would fight the
-brand-new search for the same output queue. The callback re-checks a token before being applied,
-so restarting mid-think doesn't leave a ghost piece on the board.
+Run the same level-7 move through the in-page fallback instead — with the counter installed in the
+page and the click dispatched there too, otherwise the probe itself has to wait for the search to
+finish and can't see the freeze — and you get **1 frame, worst frame 5074 ms**, with a 50 ms
+interval firing exactly once. The main thread is owned by that move, and the readout never ticks.
+
+`info` lines stream out during a single `go`, so progress needs no slicing: measured,
+`go movetime 3000` emits 22 lines at 6/7/8/…/3002 ms.
+
+**Interrupting a move means replacing the Worker.** `stop` does not interrupt this build: `go` runs
+on the same thread that reads commands, so a `stop` sent at 800 ms still yields a 3000 ms move
+(measured 3001 ms). Undo, restart and changing the level therefore call `worker.terminate()` and
+reboot — measured 215 ms back to `ready`, with `AI.busy` already false and the output queue empty,
+and the next move on a different level plays normally. The callback also re-checks a token before
+being applied, so restarting mid-think doesn't leave a ghost piece on the board.
+
+Threading is off the table rather than merely declined: under `file://` there is no
+`SharedArrayBuffer` (`crossOriginIsolated` is false), and without it this build cannot even set
+`Threads > 1`. `Threads 1` is a hard fact here, not a conservative choice.
 
 While the computer thinks, the two lines under the status message refresh every 200 ms: the upper
 one shows completed plies and elapsed time, the lower one the number of positions searched, e.g.
@@ -200,10 +210,14 @@ The move list uses Chinese notation. Files are counted from **each player's own*
 so Red's file 1 is at the far right of the screen and Black's file 1 at the far left. Red writes
 files as `一二三四五六七八九`, Black as `1…9`.
 
+The piece characters are `帥仕相馬車炮兵` for Red and `將士象馬車砲卒` for Black — horse and rook
+are written 馬 and 車, and Black's cannon is 砲 rather than 炮, exactly as they are carved on the
+pieces.
+
 The shape is `piece + origin file + action + destination`:
 
 - `炮二平五` — the cannon on file 2 moves sideways to file 5.
-- `马八进七` — the horse on file 8 jumps forward to file 7. Horses, elephants and advisors move
+- `馬八进七` — the horse on file 8 jumps forward to file 7. Horses, elephants and advisors move
   diagonally, so a step count is always 2 and carries no information: for them the destination is
   written as a file, not as a number of steps.
 - `兵七进一` — the soldier on file 7 advances one step; here the tail is a step count.
@@ -211,7 +225,7 @@ The shape is `piece + origin file + action + destination`:
 Ambiguity is resolved **positionally**, as the competition rules do: when two or more pieces of
 the same kind sit on one file, the file number cannot tell them apart, so they switch to
 `前` / `后` (or `前` / `中` / `后` for three), and once 前/后 is used the file number is dropped —
-`前马进七`, `中兵进一`. Two same-kind pieces on different files are already unambiguous, because
+`前馬进七`, `中兵进一`. Two same-kind pieces on different files are already unambiguous, because
 the file number is part of the notation.
 
 Notation has to be computed **before** the move is made: it reads the board as it was beforehand,
@@ -222,7 +236,8 @@ once and stored in the history, which undo shortens and restart clears.
 
 Four buttons under the move list: import, export, copy, paste.
 
-Export writes one line per move, `1. 炮二平五 馬2进3`, into a file named
+Export writes one line per round — a Red move and a Black move together — as
+`1. 炮二平五 馬2进3`, into a file named
 `xq_YYYY-MM-DD_HH-MM-SS.txt`. The file starts with a UTF-8 BOM — without it Windows Notepad guesses
 a local encoding and the Chinese notation turns into mojibake.
 
@@ -230,7 +245,8 @@ Import **does not parse the notation**. Each token is matched against the notati
 every legal move in the position reached so far, and an equal one is that move. Notation is already
 unique for a given position (same-file ambiguity is resolved by 前/中/后), so a match has to be that
 move and a mismatch means the game does not reach this far. That also means the separator never had
-to be pinned down: newlines, spaces, Chinese or Latin commas and semicolons all split tokens, and a
+to be pinned down: newlines, spaces, Chinese or Latin commas, full stops and semicolons all split
+tokens, and a
 leading `1.`-style number is stripped, so a hand-typed line or something pasted from elsewhere reads
 back fine.
 
@@ -254,8 +270,9 @@ rather than the board getting squashed.
 The board is **not square**: 9 files × 10 ranks, plus the frame margins, comes to 9.24 ×
 10.24 cell pitches, so `layout()` has to solve for cell pitch in each direction and take the
 smaller. Treating it as square makes the board overflow sideways in a narrow window and leaves a
-band of empty space above and below in a wide one. As the available space grows, the board takes
-94% of the smaller side of the board area and scales up proportionally; piece radius, font size,
+band of empty space above and below in a wide one. Each direction first loses an 8 px border and
+then fills 94% of what is left, and the smaller of the two cell pitches wins, so the board scales up
+proportionally as space grows; piece radius, font size,
 line width, selection ring, target dots and glows are all derived from that one cell pitch, so
 board and pieces always scale together.
 
@@ -353,11 +370,12 @@ no error.
 index.html        layout and the right-hand panel; scripts load at the bottom in dependency order
 css/style.css     theme tokens, responsive layout, stamp and banner animations
 js/rules.js       the 9×10 position, move generation and legality, check / mate / stalemate / repetition, FEN for the engine
-js/notation.js    Chinese notation (炮二平五 / 前马进七)
+js/notation.js    Chinese notation (炮二平五 / 前馬进七)
 js/render.js      Canvas drawing and animation, including both PALETTES
 js/sound.js       Web Audio synthesized sound
-engine/           Pikafish-HCE compiled to single-threaded WASM, its base64 inline blob, and the build scripts
-js/engine.js      engine adapter: instantiation, UCI handshake, layer-by-layer go, ICCS decoding
+engine/           Pikafish-HCE compiled to single-threaded WASM, its base64 inline blob, the
+                  Worker glue string, and the build scripts
+js/engine.js      engine adapter: Worker boot, UCI handshake, `go movetime`, ICCS decoding
 js/ai.js          engine host: one think at a time, cancellation and token checks
 js/main.js        state machine and UI events
 js/search.js      the JS search that was here before the WASM engine (iterative-deepening alpha-beta +

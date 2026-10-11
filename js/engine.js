@@ -1,15 +1,18 @@
 /**
- * WASM 引擎(Pikafish-HCE)适配层。两个约束决定了这里的写法:
+ * WASM 引擎(Pikafish-HCE)适配层。引擎跑在 Worker 里,这是整个写法的前提:
  *
- * 1. 双击 index.html 就得能玩,而 file:// 下 Chrome/Edge 禁 fetch 和 XHR,
- *    .wasm 取不到。所以引擎是 engine/wasm64.js 里的一段 base64,经
- *    Module.instantiateWasm 注入。glue 里的 Module.wasmBinary 是死路:
- *    instantiateArrayBuffer 不接这个参数,转头又按文件名去读第二遍。
- * 2. 这个构建只在读命令那一处让出,一次 `go` 从发起到 bestmove 全程占死主线程。
- *    所以一次思考按层下发 —— go depth 1、2、3……,每层之间让出一次事件循环,
- *    状态栏读数才刷得动、动画才不卡、点击才不会被吞。
- *    按层而不是按节点预算切:实测反复 `go nodes N` 每片都是独立搜索,深度在
- *    13~17 之间乱跳、bestmove 每片换一个,4/5 档会退化成 0.1 秒的棋力。
+ * 这个构建只在读命令那一处让出,一次 `go` 从发起到 bestmove 全程占死它所在的线程。
+ * 放在主线程上就是冻住页面,所以只能按层切片下发。放进 Worker 之后主线程始终活着,
+ * 一次思考就是干干净净的一条 `go movetime N` —— 实测 info 行是实时吐出来的
+ * (3 秒一手在 6/7/8/…/3002 ms 各到一条),状态栏的读数照刷不误,不用再切。
+ *
+ * Worker 的源码必须是页面上已有的字符串:file:// 下 Chrome 既不让
+ * `new Worker('engine/pikafish-hce.js')`(origin 是 'null'),blob Worker 里也不让
+ * importScripts。所以 glue 由 engine/build/make_worker.sh 编成 window.XQ_WORKER_JS,
+ * 做成 blob: URL 起;wasm 仍是 base64,Worker 起来之后 postMessage 进去。
+ *
+ * Worker 起不来(别的浏览器在 file:// 下另有限制)就退回页内实例化:搜索策略完全一样,
+ * 代价是主线程会被一手棋占住。
  */
 
 const TIERS = {
@@ -18,60 +21,110 @@ const TIERS = {
   '3': { skill: 20, ms: 200 },
   '4': { skill: 20, ms: 600 },
   '5': { skill: 20, ms: 1000 },
-  // 6、7 档另加 nodes:单层上限不到位的时限根本花不出去(实测 5 秒档跑到 2.9 秒、
-  // 20 层就被掐停了),加深只能靠放宽这一层能搜多少节点。代价见 LAYER_NODES。
-  '6': { skill: 20, ms: 2000, nodes: 1000000 },
-  '7': { skill: 20, ms: 5000, nodes: 2000000 },
+  '6': { skill: 20, ms: 2000 },
+  '7': { skill: 20, ms: 5000 },
 };
 
-/* 单层的节点上限。层与层的时间极不均匀(40 万上限下实测单层中位 1~3ms、p99 370~470ms、
-   最长 570~650ms),这个上限是给"主线程一次卡多久"兜底的。它是软的:引擎每隔
-   min(1024, nodes/1024) 次根着法才查一次节点数,所以会超一点。掐掉了就停止加深。
-
-   它同时也是深度的天花板,所以 6、7 档按档位放宽。实测最长的一层跟着上限走:
-   40 万 ≈ 0.6 秒、100 万 ≈ 1.5 秒、200 万 ≈ 2.3 秒 —— 那是这一手里最长的一次卡顿,
-   期间读数不刷、点击排队;而且放宽之后"卡得久"的层从偶发变成常态(200 万档 7.5% 的层
-   超过 0.39 秒)。这个构建只在读命令处让出,想在一次迭代里搜得更深就得卡得更久,没有两全。 */
-const LAYER_NODES = 400000;
-
 const Engine = {
-  sf: null,
-  state: 'boot', // boot -> ready,或 failed
+  sf: null,        // 页内实例化时才用
+  worker: null,
+  mode: '',        // 'worker' | 'page'
+  state: 'boot',   // boot -> ready,或 failed
   error: '',
   queue: [],
   waiter: null,
   waiters: [],
+  gen: 0,          // 每次(重)启动加一号,据此丢掉上一次启动的收尾
 
-  start() {
+  start() { this.reboot(); },
+
+  /** 起引擎并做完 UCI 握手。悔棋/重开打断一手棋时也要重起,见 think().cancel。 */
+  async reboot() {
+    const gen = ++this.gen;
+    this.state = 'boot';
+    this.dropWorker();
+    this.sf = null;
+    this.queue = [];
+    this.waiter = null;
+
+    try {
+      if (!window.XQ_WASM_B64) throw new Error('没加载到 engine/wasm64.js');
+      if (window.XQ_WORKER_JS) {
+        try {
+          await this.bootWorker();
+        } catch (e) {
+          // 起 Worker 失败才走这条路,不是兜着错误:页内实例化照样能下,只是会卡。
+          this.dropWorker();
+          await this.bootPage();
+        }
+      } else {
+        await this.bootPage();
+      }
+      await this.handshake();
+      if (gen !== this.gen) return;
+      this.settle('ready');
+    } catch (e) {
+      if (gen !== this.gen) return;
+      this.fail(String((e && e.message) || e));
+    }
+  },
+
+  bootWorker() {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(new Blob([window.XQ_WORKER_JS], { type: 'text/javascript' }));
+      const w = new Worker(url);
+      URL.revokeObjectURL(url);
+
+      let booted = false;
+      const timer = setTimeout(() => rej(new Error('引擎 Worker 启动超时')), 30000);
+      w.onmessage = (e) => {
+        const m = e.data || {};
+        if (m.started) { clearTimeout(timer); booted = true; res(); return; }
+        if (m.fatal) { clearTimeout(timer); rej(new Error(m.fatal)); return; }
+        if (m.out !== undefined) this.put(m.out);
+      };
+      w.onerror = (e) => {
+        clearTimeout(timer);
+        // 已经起好之后才出错:没有第二次机会了,直接如实报失败。
+        booted ? this.fail('引擎 Worker 中断:' + (e.message || '')) : rej(new Error(e.message || '引擎 Worker 出错'));
+      };
+
+      this.worker = w;
+      this.mode = 'worker';
+      w.postMessage({ b64: window.XQ_WASM_B64 });
+    });
+  },
+
+  bootPage() {
     const b64 = window.XQ_WASM_B64;
-    if (!b64) return this.fail('没加载到 engine/wasm64.js');
-
     const bin = atob(b64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
 
-    PikafishHCE({
+    this.mode = 'page';
+    return PikafishHCE({
       instantiateWasm: (imports, receiveInstance) =>
         WebAssembly.compile(bytes)
           .then((m) => new WebAssembly.Instance(m, imports))
-          .then(receiveInstance)
-          .catch((e) => this.fail('编译 wasm 失败:' + (e && e.message || e))),
-    })
-      .then((sf) => {
-        this.sf = sf;
-        sf.addMessageListener((line) => this.put(line));
-        this.send('uci');
-        return this.until('uciok');
-      })
-      .then(() => {
-        this.send('setoption name Threads value 1');
-        this.send('setoption name Hash value 64');
-        this.send('setoption name MultiPV value 1');
-        this.send('isready');
-        return this.until('readyok');
-      })
-      .then(() => this.settle('ready'))
-      .catch((e) => this.fail(String((e && e.message) || e)));
+          .then(receiveInstance),
+    }).then((sf) => {
+      this.sf = sf;
+      sf.addMessageListener((line) => this.put(line));
+    });
+  },
+
+  async handshake() {
+    this.send('uci');
+    await this.until('uciok');
+    this.send('setoption name Threads value 1');
+    this.send('setoption name Hash value 64');
+    this.send('setoption name MultiPV value 1');
+    this.send('isready');
+    await this.until('readyok');
+  },
+
+  dropWorker() {
+    if (this.worker) { this.worker.terminate(); this.worker = null; }
   },
 
   fail(msg) {
@@ -91,7 +144,10 @@ const Engine = {
     return new Promise((res, rej) => this.waiters.push({ res, rej }));
   },
 
-  send(line) { this.sf.postMessage(line); },
+  send(line) {
+    if (this.mode === 'worker') { if (this.worker) this.worker.postMessage({ cmd: line }); }
+    else if (this.sf) this.sf.postMessage(line);
+  },
 
   put(line) {
     const s = typeof line === 'string' ? line : String(line);
@@ -130,7 +186,13 @@ const Engine = {
       nodes: 0,
       started: performance.now(),
       dead: false,
-      cancel() { this.dead = true; },
+      cancel() {
+        if (this.dead) return;
+        this.dead = true;
+        // `stop` 打不断这个构建:go 就跑在读命令的那个线程上,实测 800ms 时发 stop,
+        // 3000ms 的一手照样跑满 3001ms。要立刻腾出引擎只能把 Worker 换掉。
+        if (Engine.mode === 'worker') Engine.reboot();
+      },
     };
     const done = this.run(board, t, s).then((res) => (s.dead ? null : res));
     return { current: s, done };
@@ -138,49 +200,29 @@ const Engine = {
 
   async run(board, t, s) {
     await this.whenReady();
+    // 引擎还在 boot 时这一手就被 cancel 掉的话,会一直挂在 waiters 里;重起完成时它会被
+    // 唤醒,那就得在这儿收手 —— 否则会给新引擎补发一条 go,和新那手抢同一条输出队列。
+    if (s.dead) return null;
 
     const t0 = performance.now();
-    const cap = t.nodes || LAYER_NODES;
     this.send('setoption name Skill Level value ' + t.skill);
     this.send('position fen ' + board.fen());
+    this.send('go movetime ' + t.ms);
 
     let best = '';
-    for (let d = 1; ; d++) {
-      // 悔棋/重开/换难度打断了这一局:一层跑完就收手,绝不再下发下一条 go,
-      // 否则会和紧接着开始的新搜索抢同一条输出队列。
-      if (s.dead) return null;
-      // 第 1 层永远要跑,不然这一手连个着法都没有。
-      if (d > 1 && performance.now() - t0 >= t.ms) break;
-
-      // 此刻引擎正停在 getline 上等下一条命令。让出一个宏任务,浏览器才画得了一帧、
-      // 状态栏那个 200ms 定时器才走得了一步:Asyncify 只在真正 await 时才交回控制权,
-      // 光靠微任务链浏览器是插不进来的(实测一整秒一次都不刷新)。
-      if (d > 1) await new Promise((r) => setTimeout(r, 0));
-
-      this.send('go depth ' + d + ' nodes ' + cap);
-      let layerNodes = 0, depth = 0;
-      for (;;) {
-        const line = await this.next();
-        if (line.indexOf('info') === 0) {
-          // 只有跑完的整层才会打 info,所以这个 depth 可信。它能高到 245,那不是假读数:
-          // 245 是迭代加深的 MAX_PLY 封顶,而已证杀的局面里超过杀距的每一层只要 1~4ms,
-          // 200ms 的预算能一路刷到 200 多层。
-          const m = / depth (\d+).* nodes (\d+)/.exec(line);
-          if (m) { depth = +m[1]; layerNodes = +m[2]; }
-          continue;
-        }
-        if (line.indexOf('bestmove') === 0) {
-          best = line.split(' ')[1] || '';
-          break;
-        }
+    for (;;) {
+      const line = await this.next();
+      if (line.indexOf('info') === 0) {
+        // 只有跑完的整层才会打 info,所以这个 depth 可信。它能高到 245,那不是假读数:
+        // 245 是迭代加深的 MAX_PLY 封顶,而已证杀的局面里超过杀距的每一层只要 1~4ms。
+        const m = / depth (\d+) .* nodes (\d+)/.exec(line);
+        if (m) { s.completeDepth = +m[1]; s.nodes = +m[2]; }
+        continue;
       }
-      s.nodes += layerNodes;
-      // 每次 `go depth d` 都从第 1 层重新打 info,所以被节点上限掐掉的那一层报的
-      // depth 可能比上一层还小 —— 读数不能倒退。
-      if (depth > s.completeDepth) s.completeDepth = depth;
-      if (best === '(none)' || !best) break;
-      // 这一层被节点上限掐掉了(没跑到 d):再往上只会更贵,到此为止。
-      if (depth < d) break;
+      if (line.indexOf('bestmove') === 0) {
+        best = line.split(' ')[1] || '';
+        break;
+      }
     }
 
     const base = { depth: s.completeDepth, nodes: s.nodes, elapsed: performance.now() - t0 };

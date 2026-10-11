@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>中国象棋 · 人机对战</title>
 <script>
-/* 样式表先画的是深色,所以在它之前就把主题定下来,否则会闪一下白。
+/* 样式表的默认(:root)就是深色,所以在它之前就把主题定下来,否则偏好亮色的用户会闪一下深色。
    这里内联是因为 main.js 还没加载,只能设属性。 */
 (function () {
   var theme = 'dark';
@@ -132,8 +132,11 @@
 <script src="js/notation.js"></script>
 <script src="js/render.js"></script>
 <script src="js/sound.js"></script>
+<!-- pikafish-hce.js 只在 Worker 起不来时兜底用;正常路径下引擎在 Worker 里,
+     用的是 worker64.js 里那份 glue 源码字符串。 -->
 <script src="engine/pikafish-hce.js"></script>
 <script src="engine/wasm64.js"></script>
+<script src="engine/worker64.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/main.js"></script>
